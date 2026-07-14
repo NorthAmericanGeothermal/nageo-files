@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>NAGeo Files</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+CiAgPHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iNiIgZmlsbD0iIzFhM2E2YiIvPgogIDx0ZXh0IHg9IjE2IiB5PSIxMyIgZm9udC1mYW1pbHk9Ikdlb3JnaWEsc2VyaWYiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZmZmZmZmIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5OQTwvdGV4dD4KICA8dGV4dCB4PSIxNiIgeT0iMjMiIGZvbnQtZmFtaWx5PSJHZW9yZ2lhLHNlcmlmIiBmb250LXNpemU9IjgiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjYzAzOTJiIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5HRU88L3RleHQ+CiAgPGxpbmUgeDE9IjQiIHkxPSIyNiIgeDI9IjI4IiB5Mj0iMjYiIHN0cm9rZT0iI2MwMzkyYiIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KPC9zdmc+">
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+:root{
+  --navy:#0f2341;--navy2:#1a3561;--blue:#2e73d4;--blue-light:#dbeafe;
+  --green:#16a34a;--green-bg:#dcfce7;--red:#dc2626;--red-bg:#fee2e2;
+  --bg:#f0f4f8;--surface:#ffffff;--border:#e2e8f0;
+  --text:#0f172a;--text2:#475569;--text3:#94a3b8;
+  --radius:14px;--radius-sm:8px;
+  --shadow:0 1px 4px rgba(0,0,0,.08),0 4px 16px rgba(0,0,0,.06);
+  --shadow-lg:0 8px 32px rgba(0,0,0,.12);
+}
+html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);font-size:16px;line-height:1.5;-webkit-font-smoothing:antialiased;}
+.reg-screen{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:1.5rem;background:linear-gradient(135deg,#0a1628 0%,#0f2341 60%,#1a3a6b 100%);}
+.reg-card{background:#fff;border-radius:24px;padding:2.5rem 2rem;width:100%;max-width:400px;text-align:center;box-shadow:0 32px 80px rgba(0,0,0,.4);}
+.reg-logo{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:1.5rem;}
+.reg-logo-icon{width:52px;height:52px;background:var(--navy);border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:24px;}
+.reg-logo-text{font-size:24px;font-weight:800;color:var(--navy);letter-spacing:-.5px;}
+.reg-logo-text span{color:var(--blue);}
+.reg-title{font-size:22px;font-weight:700;color:var(--text);margin-bottom:6px;}
+.reg-sub{font-size:14px;color:var(--text2);margin-bottom:2rem;line-height:1.6;}
+.reg-label{font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.6px;text-align:left;margin-bottom:6px;}
+.reg-input{width:100%;padding:14px 18px;border:2px solid var(--border);border-radius:var(--radius-sm);font-size:16px;font-family:inherit;background:#f8fafc;color:var(--text);letter-spacing:2px;text-align:center;margin-bottom:12px;transition:border-color .2s;}
+.reg-input:focus{outline:none;border-color:var(--blue);background:#fff;}
+.reg-btn{width:100%;padding:14px;background:var(--navy);color:#fff;border:none;border-radius:var(--radius-sm);font-size:16px;font-weight:700;cursor:pointer;transition:all .2s;}
+.reg-btn:hover{background:var(--navy2);transform:translateY(-1px);}
+.reg-err{font-size:13px;color:var(--red);margin-top:10px;font-weight:500;display:none;}
+.reg-help{font-size:12px;color:var(--text3);margin-top:1.5rem;line-height:1.6;}
+#app{height:100vh;flex-direction:column;display:none;}
+#app.visible{display:flex;}
+.topbar{background:var(--navy);height:56px;display:flex;align-items:center;gap:12px;padding:0 1.25rem;flex-shrink:0;box-shadow:0 2px 8px rgba(0,0,0,.2);}
+.topbar-logo{font-size:16px;font-weight:800;color:#fff;letter-spacing:-.3px;}
+.topbar-logo span{color:#6aadff;}
+.topbar-search{flex:1;max-width:420px;position:relative;}
+.topbar-search input{width:100%;padding:8px 14px 8px 36px;border:none;border-radius:20px;background:rgba(255,255,255,.12);color:#fff;font-size:14px;font-family:inherit;}
+.topbar-search input::placeholder{color:rgba(255,255,255,.45);}
+.topbar-search input:focus{outline:none;background:rgba(255,255,255,.2);}
+.topbar-search-icon{position:absolute;left:11px;top:50%;transform:translateY(-50%);font-size:14px;pointer-events:none;}
+.topbar-right{margin-left:auto;display:flex;align-items:center;gap:8px;}
+.topbar-btn{background:rgba(255,255,255,.1);border:none;color:rgba(255,255,255,.7);padding:7px 14px;border-radius:20px;font-size:13px;cursor:pointer;font-family:inherit;transition:all .15s;}
+.topbar-btn:hover{background:rgba(255,255,255,.2);color:#fff;}
+.hamburger{display:none;background:rgba(255,255,255,.1);border:none;color:#fff;padding:8px 10px;border-radius:8px;cursor:pointer;font-size:18px;line-height:1;}
+.app-body{flex:1;display:flex;overflow:hidden;}
+.sidebar{width:300px;flex-shrink:0;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;}
+.sidebar-header{padding:14px 14px 10px;border-bottom:1px solid var(--border);flex-shrink:0;}
+.sidebar-title{font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.7px;margin-bottom:10px;}
+.sidebar-search{position:relative;}
+.sidebar-search input{width:100%;padding:10px 14px 10px 34px;border:1.5px solid var(--border);border-radius:20px;font-size:14px;font-family:inherit;background:#f8fafc;color:var(--text);}
+.sidebar-search input:focus{outline:none;border-color:var(--blue);background:#fff;}
+.sidebar-search-icon{position:absolute;left:11px;top:50%;transform:translateY(-50%);font-size:14px;pointer-events:none;}
+.sidebar-list{flex:1;overflow-y:auto;padding:6px;}
+.customer-item{display:flex;align-items:center;gap:10px;padding:11px 10px;border-radius:var(--radius-sm);cursor:pointer;transition:all .15s;margin-bottom:2px;}
+.customer-item:hover{background:var(--blue-light);}
+.customer-item.active{background:var(--blue-light);border:1.5px solid var(--blue);}
+.customer-avatar{width:40px;height:40px;border-radius:50%;background:var(--navy);color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;flex-shrink:0;}
+.customer-item.active .customer-avatar{background:var(--blue);}
+.customer-info{flex:1;min-width:0;}
+.customer-name{font-size:14px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.customer-meta{font-size:11px;color:var(--text3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.sidebar-msg{padding:2rem 1rem;text-align:center;color:var(--text3);font-size:14px;line-height:1.6;}
+.file-area{flex:1;display:flex;flex-direction:column;overflow:hidden;}
+.file-empty-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:2rem;text-align:center;}
+.file-empty-icon{font-size:72px;margin-bottom:1.5rem;opacity:.3;}
+.file-empty-title{font-size:22px;font-weight:700;color:var(--text);margin-bottom:8px;}
+.file-empty-sub{font-size:15px;color:var(--text2);max-width:320px;line-height:1.6;}
+#fileBrowser{flex:1;display:none;flex-direction:column;overflow:hidden;}
+#fileBrowser.show{display:flex;}
+.file-header{padding:14px 18px 12px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0;}
+.file-customer-name{font-size:18px;font-weight:800;color:var(--text);margin-bottom:6px;}
+.file-customer-meta{font-size:12px;color:var(--text3);margin-bottom:12px;}
+.breadcrumb{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:12px;}
+.bc-item{font-size:14px;color:var(--blue);cursor:pointer;font-weight:500;background:none;border:none;font-family:inherit;padding:2px 0;}
+.bc-item:hover{text-decoration:underline;}
+.bc-item.cur{color:var(--text);cursor:default;font-weight:700;}
+.bc-item.cur:hover{text-decoration:none;}
+.bc-sep{color:var(--text3);}
+.file-actions{display:flex;gap:8px;flex-wrap:wrap;}
+.action-btn{display:flex;align-items:center;gap:6px;padding:9px 16px;border-radius:20px;border:none;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;transition:all .15s;white-space:nowrap;}
+.action-btn:active{transform:scale(.97);}
+.btn-folder{background:var(--navy);color:#fff;}
+.btn-folder:hover{background:var(--navy2);}
+.btn-upload{background:var(--blue);color:#fff;}
+.btn-upload:hover{background:#1d5cb8;}
+.btn-camera{background:#7c3aed;color:#fff;}
+.btn-camera:hover{background:#6d28d9;}
+.file-content{flex:1;overflow-y:auto;padding:14px 18px;position:relative;}
+.drop-overlay{position:absolute;inset:0;background:rgba(46,115,212,.07);border:3px dashed var(--blue);border-radius:var(--radius);display:none;align-items:center;justify-content:center;z-index:10;flex-direction:column;gap:10px;pointer-events:none;}
+.drop-overlay.active{display:flex;}
+.drop-overlay-big{font-size:52px;}
+.drop-overlay-text{font-size:20px;font-weight:700;color:var(--blue);}
+.section-label{font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.7px;margin-bottom:10px;}
+.file-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-bottom:18px;}
+.folder-card,.file-card{background:var(--surface);border:1.5px solid var(--border);border-radius:var(--radius);padding:16px 12px;cursor:pointer;transition:all .15s;display:flex;flex-direction:column;align-items:center;gap:8px;text-align:center;position:relative;user-select:none;}
+.folder-card:hover,.file-card:hover{border-color:var(--blue);box-shadow:var(--shadow);transform:translateY(-2px);}
+.folder-card:active,.file-card:active{transform:translateY(0);}
+.card-icon{font-size:38px;line-height:1;}
+.card-name{font-size:13px;font-weight:600;color:var(--text);word-break:break-word;line-height:1.3;max-height:2.8em;overflow:hidden;}
+.card-meta{font-size:11px;color:var(--text3);}
+.card-menu{position:absolute;top:7px;right:7px;background:none;border:none;font-size:17px;color:var(--text3);cursor:pointer;padding:3px 5px;border-radius:5px;opacity:0;transition:opacity .15s;line-height:1;}
+.folder-card:hover .card-menu,.file-card:hover .card-menu{opacity:1;}
+.card-menu:hover{background:var(--border);color:var(--text);opacity:1!important;}
+.folder-empty-area{padding:3rem 1rem;text-align:center;color:var(--text3);}
+.folder-empty-icon{font-size:52px;margin-bottom:12px;opacity:.4;}
+.folder-empty-strong{font-size:17px;font-weight:700;color:var(--text2);margin-bottom:6px;}
+.folder-empty-p{font-size:14px;line-height:1.6;}
+.ctx-menu{position:fixed;background:#fff;border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow-lg);z-index:500;min-width:170px;padding:5px;display:none;}
+.ctx-menu.show{display:block;}
+.ctx-item{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:7px;cursor:pointer;font-size:14px;color:var(--text);border:none;background:none;width:100%;font-family:inherit;text-align:left;}
+.ctx-item:hover{background:var(--bg);}
+.ctx-item.danger{color:var(--red);}
+.ctx-item.danger:hover{background:var(--red-bg);}
+.ctx-div{height:1px;background:var(--border);margin:4px 0;}
+.upload-bar{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid var(--border);padding:12px 20px;display:none;align-items:center;gap:14px;z-index:200;box-shadow:0 -4px 16px rgba(0,0,0,.08);}
+.upload-bar.show{display:flex;}
+.upload-bar-info{flex:1;}
+.upload-bar-label{font-size:14px;font-weight:600;color:var(--text);margin-bottom:5px;}
+.upload-bar-track{height:6px;background:var(--border);border-radius:3px;overflow:hidden;}
+.upload-bar-fill{height:100%;background:var(--blue);border-radius:3px;transition:width .2s;}
+.upload-bar-pct{font-size:12px;color:var(--text2);margin-top:4px;}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:400;display:none;align-items:center;justify-content:center;padding:1rem;backdrop-filter:blur(3px);}
+.modal-bg.open{display:flex;}
+.modal{background:#fff;border-radius:20px;width:100%;max-width:440px;box-shadow:var(--shadow-lg);overflow:hidden;}
+.modal-hdr{padding:20px 24px 0;display:flex;align-items:center;justify-content:space-between;}
+.modal-title{font-size:18px;font-weight:700;color:var(--text);}
+.modal-close{background:none;border:none;font-size:22px;color:var(--text3);cursor:pointer;line-height:1;padding:2px;}
+.modal-body{padding:20px 24px 24px;}
+.modal-label{font-size:13px;font-weight:600;color:var(--text2);margin-bottom:7px;display:block;}
+.modal-input{width:100%;padding:13px 16px;border:2px solid var(--border);border-radius:var(--radius-sm);font-size:15px;font-family:inherit;color:var(--text);background:#f8fafc;transition:border-color .2s;}
+.modal-input:focus{outline:none;border-color:var(--blue);background:#fff;}
+.modal-btns{display:flex;gap:10px;margin-top:18px;}
+.modal-cancel{flex:1;padding:13px;border:1.5px solid var(--border);border-radius:var(--radius-sm);background:#fff;color:var(--text2);font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;}
+.modal-ok{flex:2;padding:13px;border:none;border-radius:var(--radius-sm);background:var(--navy);color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit;}
+.modal-ok:hover{background:var(--navy2);}
+.modal-danger{background:var(--red);}
+.modal-danger:hover{background:#b91c1c;}
+.preview-content{padding:16px 20px 20px;}
+.preview-img{max-width:100%;border-radius:8px;display:block;margin:0 auto;}
+.preview-pdf{width:75vw;height:75vh;border:none;border-radius:8px;}
+.toast{position:fixed;bottom:70px;left:50%;transform:translateX(-50%);background:var(--text);color:#fff;padding:12px 22px;border-radius:20px;font-size:14px;font-weight:500;z-index:600;opacity:0;transition:opacity .3s;pointer-events:none;white-space:nowrap;max-width:90vw;text-align:center;}
+.toast.show{opacity:1;}
+.toast.ok{background:var(--green);}
+.toast.err{background:var(--red);}
+.search-results{position:absolute;top:calc(100% + 6px);left:0;right:0;background:#fff;border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow-lg);z-index:300;max-height:360px;overflow-y:auto;display:none;}
+.search-results.show{display:block;}
+.sr-item{display:flex;align-items:center;gap:10px;padding:11px 14px;cursor:pointer;border-bottom:1px solid var(--border);}
+.sr-item:last-child{border-bottom:none;}
+.sr-item:hover{background:var(--bg);}
+.sr-icon{font-size:20px;flex-shrink:0;}
+.sr-info{flex:1;min-width:0;}
+.sr-name{font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.sr-sub{font-size:11px;color:var(--text3);}
+.sr-badge{font-size:10px;padding:2px 8px;border-radius:4px;font-weight:700;flex-shrink:0;}
+.badge-folder{background:#fef3c7;color:#92400e;}
+.badge-file{background:var(--blue-light);color:var(--blue);}
+@media(max-width:700px){
+  .sidebar{position:fixed;inset:56px 0 0 0;width:100%;z-index:100;transform:translateX(-100%);transition:transform .3s;box-shadow:var(--shadow-lg);}
+  .sidebar.open{transform:translateX(0);}
+  .hamburger{display:flex;}
+  .topbar-search{display:none;}
+  .file-grid{grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;}
+  .file-header{padding:10px 12px 10px;}
+  .file-content{padding:10px 12px;}
+  .action-btn{padding:8px 12px;font-size:13px;}
+  .preview-pdf{width:90vw;height:60vh;}
+}
+</style>
+</head>
+<body>
+
+<!-- REGISTRATION -->
+<div class="reg-screen" id="regScreen">
+  <div class="reg-card">
+    <div class="reg-logo">
+      <div class="reg-logo-icon">📁</div>
+      <div class="reg-logo-text">NAGeo <span>Files</span></div>
+    </div>
+    <div class="reg-title">Welcome to NAGeo Files</div>
+    <div class="reg-sub">Enter your one-time registration code to unlock this device. You won't need to do this again.</div>
+    <div class="reg-label">Registration Code</div>
+    <input type="text" class="reg-input" id="regInput" placeholder="NAG-XXXXX-XXXXX-XXX" maxlength="22" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false">
+    <button type="button" class="reg-btn" id="regBtn">Unlock This Device</button>
+    <div class="reg-err" id="regErr">❌ That code isn't right. Please try again or ask your manager.</div>
+    <div class="reg-help">Contact your office manager if you need the registration code.</div>
+  </div>
+</div>
+
+<!-- APP -->
+<div id="app">
+  <div class="topbar">
+    <button class="hamburger" id="hamburgerBtn" title="Show customers">☰</button>
+    <div class="topbar-logo">NAGeo <span>Files</span></div>
+    <div class="topbar-search" style="position:relative">
+      <span class="topbar-search-icon">🔍</span>
+      <input type="text" id="globalSearch" placeholder="Search files and folders…" autocomplete="off">
+      <div class="search-results" id="searchResults"></div>
+    </div>
+    <div class="topbar-right">
+      <button class="topbar-btn" id="signOutBtn">Sign out</button>
+    </div>
+  </div>
+
+  <div class="app-body">
+    <div class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-title">All Customers</div>
+        <div class="sidebar-search">
+          <span class="sidebar-search-icon">🔍</span>
+          <input type="text" id="customerSearch" placeholder="Search name, ID, address…" autocomplete="off">
+        </div>
+      </div>
+      <div class="sidebar-list" id="customerList">
+        <div class="sidebar-msg">Loading customers…</div>
+      </div>
+    </div>
+
+    <div class="file-area">
+      <div class="file-empty-state" id="emptyState">
+        <div class="file-empty-icon">📂</div>
+        <div class="file-empty-title">Pick a Customer</div>
+        <div class="file-empty-sub">Search for a customer on the left, then tap their name to view and manage their files.</div>
+      </div>
+
+      <div id="fileBrowser">
+        <div class="file-header">
+          <div class="file-customer-name" id="fcName"></div>
+          <div class="file-customer-meta" id="fcMeta"></div>
+          <div class="breadcrumb" id="breadcrumb"></div>
+          <div class="file-actions">
+            <button class="action-btn btn-folder" id="newFolderBtn">📁 New Folder</button>
+            <button class="action-btn btn-upload" id="uploadBtn">⬆️ Upload Files</button>
+            <button class="action-btn btn-camera" id="cameraBtn">📷 Take Photo</button>
+          </div>
+        </div>
+        <div class="file-content" id="fileContent">
+          <div class="drop-overlay" id="dropOverlay">
+            <div class="drop-overlay-big">📂</div>
+            <div class="drop-overlay-text">Drop files here to upload</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<input type="file" id="fileInput" multiple style="display:none" accept="*/*">
+<input type="file" id="cameraInput" capture="environment" accept="image/*,video/*" style="display:none">
+
+<!-- Upload bar -->
+<div class="upload-bar" id="uploadBar">
+  <div style="font-size:28px">⬆️</div>
+  <div class="upload-bar-info">
+    <div class="upload-bar-label" id="uploadLabel">Uploading…</div>
+    <div class="upload-bar-track"><div class="upload-bar-fill" id="uploadFill" style="width:0%"></div></div>
+    <div class="upload-bar-pct" id="uploadPct">0%</div>
+  </div>
+</div>
+
+<!-- Context menu -->
+<div class="ctx-menu" id="ctxMenu">
+  <button class="ctx-item" id="ctxOpen">📂 Open</button>
+  <button class="ctx-item" id="ctxPreview">👁️ Preview</button>
+  <button class="ctx-item" id="ctxDownload">⬇️ Download</button>
+  <button class="ctx-item" id="ctxRename">✏️ Rename</button>
+  <div class="ctx-div"></div>
+  <button class="ctx-item danger" id="ctxDelete">🗑️ Delete</button>
+</div>
+
+<!-- New Folder Modal -->
+<div class="modal-bg" id="modalNewFolder">
+  <div class="modal">
+    <div class="modal-hdr">
+      <div class="modal-title">📁 New Folder</div>
+      <button class="modal-close" onclick="closeModal('modalNewFolder')">✕</button>
+    </div>
+    <div class="modal-body">
+      <label class="modal-label">What would you like to call this folder?</label>
+      <input type="text" class="modal-input" id="newFolderName" placeholder="e.g. Permits, Photos, Contracts…" maxlength="80">
+      <div class="modal-btns">
+        <button class="modal-cancel" onclick="closeModal('modalNewFolder')">Cancel</button>
+        <button class="modal-ok" id="createFolderBtn">📁 Create Folder</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Rename Modal -->
+<div class="modal-bg" id="modalRename">
+  <div class="modal">
+    <div class="modal-hdr">
+      <div class="modal-title">✏️ Rename</div>
+      <button class="modal-close" onclick="closeModal('modalRename')">✕</button>
+    </div>
+    <div class="modal-body">
+      <label class="modal-label">New name:</label>
+      <input type="text" class="modal-input" id="renameInput" placeholder="Enter new name…" maxlength="200">
+      <div class="modal-btns">
+        <button class="modal-cancel" onclick="closeModal('modalRename')">Cancel</button>
+        <button class="modal-ok" id="renameOkBtn">Save Name</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Delete Modal -->
+<div class="modal-bg" id="modalDelete">
+  <div class="modal">
+    <div class="modal-hdr">
+      <div class="modal-title">🗑️ Delete</div>
+      <button class="modal-close" onclick="closeModal('modalDelete')">✕</button>
+    </div>
+    <div class="modal-body">
+      <p style="font-size:15px;color:var(--text2);line-height:1.7;" id="deleteMsg">Are you sure? This cannot be undone.</p>
+      <div class="modal-btns">
+        <button class="modal-cancel" onclick="closeModal('modalDelete')">No, Keep It</button>
+        <button class="modal-ok modal-danger" id="deleteOkBtn">Yes, Delete</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Preview Modal -->
+<div class="modal-bg" id="modalPreview" onclick="if(event.target===this)closeModal('modalPreview')">
+  <div class="modal" style="max-width:92vw;width:auto;">
+    <div class="modal-hdr" style="padding:16px 20px 12px;">
+      <div class="modal-title" id="previewTitle" style="font-size:15px;max-width:80%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>
+      <button class="modal-close" onclick="closeModal('modalPreview')">✕</button>
+    </div>
+    <div class="preview-content" id="previewContent"></div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
