@@ -1,6 +1,6 @@
 // NAGeo Files — app.js
 // Update WORKER_BASE after deploying your Cloudflare Worker
-const WORKER_BASE = "https://nageo-files.YOUR-SUBDOMAIN.workers.dev";
+const WORKER_BASE = "https://nageo-files.nagprospects.workers.dev";
 const REG_KEY = "nageo_files_reg";
 const REG_CODE = "NAG-7X4K2-9M1PW-3Q8";
 
