@@ -3,7 +3,6 @@
 const WORKER_BASE = "https://nageo-files.nagprospects.workers.dev";
 const REG_KEY = "nageo_files_reg";
 const REG_CODE = "NAG-7X4K2-9M1PW-3Q8";
-
 // ── STATE ──
 let regCode = localStorage.getItem(REG_KEY) || "";
 let allCustomers = [];
@@ -15,7 +14,11 @@ let ctxTarget = null; // {type:'folder'|'file', data}
 let renameTarget = null;
 let deleteTarget = null;
 let searchTimer = null;
-
+// Bulk select state
+let selectMode = false;
+let selectedItems = new Map(); // key "folder:id" or "file:id" -> {type, data}
+let lastFolders = [];
+let lastFiles = [];
 // ── INIT ──
 document.addEventListener("DOMContentLoaded", () => {
   if (regCode === REG_CODE) {
@@ -25,7 +28,6 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   wireEvents();
 });
-
 function wireEvents() {
   // Registration
   document.getElementById("regBtn").addEventListener("click", tryRegister);
@@ -35,7 +37,6 @@ function wireEvents() {
     let v = this.value.replace(/[^A-Za-z0-9-]/g, "").toUpperCase();
     this.value = v;
   });
-
   // Sign out
   document.getElementById("signOutBtn").addEventListener("click", () => {
     if (confirm("This will sign out this device. You'll need the registration code again.")) {
@@ -43,17 +44,14 @@ function wireEvents() {
       location.reload();
     }
   });
-
   // Hamburger (mobile)
   document.getElementById("hamburgerBtn").addEventListener("click", () => {
     document.getElementById("sidebar").classList.toggle("open");
   });
-
   // Customer search
   document.getElementById("customerSearch").addEventListener("input", function() {
     filterCustomers(this.value);
   });
-
   // Global search
   document.getElementById("globalSearch").addEventListener("input", function() {
     clearTimeout(searchTimer);
@@ -66,26 +64,28 @@ function wireEvents() {
       hideSearchResults();
     }
   });
-
   // New folder
   document.getElementById("newFolderBtn").addEventListener("click", () => openModal("modalNewFolder"));
   document.getElementById("newFolderName").addEventListener("keydown", e => { if (e.key === "Enter") createFolder(); });
   document.getElementById("createFolderBtn").addEventListener("click", createFolder);
-
   // Upload
   document.getElementById("uploadBtn").addEventListener("click", () => document.getElementById("fileInput").click());
   document.getElementById("fileInput").addEventListener("change", function() {
     if (this.files.length) uploadFiles(Array.from(this.files));
     this.value = "";
   });
-
   // Camera
   document.getElementById("cameraBtn").addEventListener("click", () => document.getElementById("cameraInput").click());
   document.getElementById("cameraInput").addEventListener("change", function() {
     if (this.files.length) uploadFiles(Array.from(this.files));
     this.value = "";
   });
-
+  // Bulk select
+  document.getElementById("selectModeBtn").addEventListener("click", toggleSelectMode);
+  document.getElementById("selectAllBtn").addEventListener("click", selectAllInView);
+  document.getElementById("selectCancelBtn").addEventListener("click", () => { if (selectMode) toggleSelectMode(); });
+  document.getElementById("selectDownloadBtn").addEventListener("click", bulkDownloadSelected);
+  document.getElementById("selectDeleteBtn").addEventListener("click", confirmBulkDelete);
   // Drag and drop
   const fc = document.getElementById("fileContent");
   fc.addEventListener("dragover", e => { e.preventDefault(); document.getElementById("dropOverlay").classList.add("active"); });
@@ -96,7 +96,6 @@ function wireEvents() {
     const files = Array.from(e.dataTransfer.files);
     if (files.length) uploadFiles(files);
   });
-
   // Context menu actions
   document.getElementById("ctxOpen").addEventListener("click", () => {
     if (!ctxTarget) return;
@@ -132,24 +131,20 @@ function wireEvents() {
         : `Delete the file "${d.name}"? This cannot be undone.`;
     openModal("modalDelete");
   });
-
   document.getElementById("renameInput").addEventListener("keydown", e => { if (e.key === "Enter") doRename(); });
   document.getElementById("renameOkBtn").addEventListener("click", doRename);
   document.getElementById("deleteOkBtn").addEventListener("click", doDelete);
-
   // Close ctx on outside click
   document.addEventListener("click", e => {
     if (!e.target.closest("#ctxMenu")) closeCtx();
   });
 }
-
 // ── REGISTRATION ──
 async function tryRegister() {
   const input = document.getElementById("regInput").value.trim().toUpperCase();
   document.getElementById("regErr").style.display = "none";
   document.getElementById("regBtn").textContent = "Checking…";
   document.getElementById("regBtn").disabled = true;
-
   try {
     const res = await fetch(`${WORKER_BASE}/api/validate`, {
       method: "POST",
@@ -172,18 +167,15 @@ async function tryRegister() {
     document.getElementById("regBtn").disabled = false;
   }
 }
-
 function showReg() {
   document.getElementById("regScreen").style.display = "flex";
   document.getElementById("app").classList.remove("visible");
 }
-
 function showApp() {
   document.getElementById("regScreen").style.display = "none";
   document.getElementById("app").classList.add("visible");
   loadCustomers();
 }
-
 // ── API HELPER ──
 async function api(method, path, body = null, isFile = false) {
   const opts = {
@@ -203,7 +195,6 @@ async function api(method, path, body = null, isFile = false) {
   }
   return res.json();
 }
-
 // ── CUSTOMERS ──
 async function loadCustomers() {
   document.getElementById("customerList").innerHTML = '<div class="sidebar-msg">Loading customers from HCP…<br><small style="opacity:.6">This may take a moment</small></div>';
@@ -227,7 +218,6 @@ async function loadCustomers() {
     document.getElementById("customerList").innerHTML = `<div class="sidebar-msg">❌ Could not load customers.<br><small>${e.message}</small><br><br><button onclick="loadCustomers()" style="padding:8px 16px;background:var(--blue);color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:13px;">Try Again</button></div>`;
   }
 }
-
 function filterCustomers(q) {
   if (!q.trim()) {
     filteredCustomers = allCustomers;
@@ -244,7 +234,6 @@ function filterCustomers(q) {
   );
   renderCustomerList(filteredCustomers);
 }
-
 function renderCustomerList(customers) {
   const el = document.getElementById("customerList");
   if (!customers.length) {
@@ -261,13 +250,13 @@ function renderCustomerList(customers) {
     </div>
   `).join("");
 }
-
 function selectCustomer(id) {
   const c = allCustomers.find(x => x.id === id);
   if (!c) return;
   currentCustomer = c;
   currentFolderId = null;
   breadcrumbs = [];
+  exitSelectMode();
   renderCustomerList(filteredCustomers); // refresh active state
   document.getElementById("emptyState").style.display = "none";
   document.getElementById("fileBrowser").classList.add("show");
@@ -277,10 +266,11 @@ function selectCustomer(id) {
   document.getElementById("sidebar").classList.remove("open");
   loadFileView();
 }
-
 // ── FILE BROWSER ──
 async function loadFileView() {
   renderBreadcrumb();
+  selectedItems.clear();
+  updateSelectBar();
   document.getElementById("fileContent").innerHTML = `
     <div class="drop-overlay" id="dropOverlay">
       <div class="drop-overlay-big">📂</div>
@@ -294,21 +284,22 @@ async function loadFileView() {
       api("GET", `/api/folders?customer_id=${currentCustomer.id}${currentFolderId ? '&parent_id=' + currentFolderId : ''}`),
       api("GET", `/api/files?customer_id=${currentCustomer.id}${currentFolderId ? '&folder_id=' + currentFolderId : ''}`),
     ]);
-    renderFileView(foldersData, filesData);
+    lastFolders = foldersData || [];
+    lastFiles = filesData || [];
+    renderFileView(lastFolders, lastFiles);
   } catch (e) {
     document.getElementById("fileContent").innerHTML = `<div style="padding:2rem;text-align:center;color:var(--red);">❌ Could not load files.<br><small>${e.message}</small></div>`;
   }
 }
-
 function renderFileView(folders, files) {
   const el = document.getElementById("fileContent");
+  el.classList.toggle("select-mode", selectMode);
   let html = `
     <div class="drop-overlay" id="dropOverlay">
       <div class="drop-overlay-big">📂</div>
       <div class="drop-overlay-text">Drop files here to upload</div>
     </div>
   `;
-
   if (!folders.length && !files.length) {
     html += `
       <div class="folder-empty-area">
@@ -321,40 +312,50 @@ function renderFileView(folders, files) {
     rewireDrop();
     return;
   }
-
   if (folders.length) {
     html += `<div class="section-label">📁 Folders</div><div class="file-grid">`;
     folders.forEach(f => {
+      const key = "folder:" + f.id;
+      const selected = selectedItems.has(key);
+      const dataAttr = JSON.stringify(f).replace(/"/g,'&quot;');
+      const clickHandler = selectMode
+        ? `toggleItemSelect('folder', ${dataAttr})`
+        : `openFolder(${dataAttr})`;
       html += `
-        <div class="folder-card" ondblclick="openFolder(${JSON.stringify(f).replace(/"/g,'&quot;')})" onclick="openFolder(${JSON.stringify(f).replace(/"/g,'&quot;')})">
+        <div class="folder-card${selected ? ' card-selected' : ''}" onclick="${clickHandler}">
+          ${selectMode ? `<div class="card-checkbox${selected ? ' checked' : ''}"></div>` : ''}
           <div class="card-icon">📁</div>
           <div class="card-name">${esc(f.name)}</div>
-          <button class="card-menu" onclick="event.stopPropagation();showCtx(event,'folder',${JSON.stringify(f).replace(/"/g,'&quot;')})">⋯</button>
+          ${selectMode ? '' : `<button class="card-menu" onclick="event.stopPropagation();showCtx(event,'folder',${dataAttr})">⋯</button>`}
         </div>
       `;
     });
     html += `</div>`;
   }
-
   if (files.length) {
     html += `<div class="section-label">📄 Files</div><div class="file-grid">`;
     files.forEach(f => {
+      const key = "file:" + f.id;
+      const selected = selectedItems.has(key);
+      const dataAttr = JSON.stringify(f).replace(/"/g,'&quot;');
+      const clickHandler = selectMode
+        ? `toggleItemSelect('file', ${dataAttr})`
+        : `previewFile(${dataAttr})`;
       html += `
-        <div class="file-card" onclick="previewFile(${JSON.stringify(f).replace(/"/g,'&quot;')})">
+        <div class="file-card${selected ? ' card-selected' : ''}" onclick="${clickHandler}">
+          ${selectMode ? `<div class="card-checkbox${selected ? ' checked' : ''}"></div>` : ''}
           <div class="card-icon">${fileIcon(f.name)}</div>
           <div class="card-name">${esc(f.name)}</div>
           <div class="card-meta">${formatSize(f.size)}</div>
-          <button class="card-menu" onclick="event.stopPropagation();showCtx(event,'file',${JSON.stringify(f).replace(/"/g,'&quot;')})">⋯</button>
+          ${selectMode ? '' : `<button class="card-menu" onclick="event.stopPropagation();showCtx(event,'file',${dataAttr})">⋯</button>`}
         </div>
       `;
     });
     html += `</div>`;
   }
-
   el.innerHTML = html;
   rewireDrop();
 }
-
 function rewireDrop() {
   const fc = document.getElementById("fileContent");
   const ov = document.getElementById("dropOverlay");
@@ -367,14 +368,12 @@ function rewireDrop() {
     if (files.length) uploadFiles(files);
   });
 }
-
 // ── NAVIGATION ──
 function openFolder(folder) {
   breadcrumbs.push({ id: currentFolderId, name: currentFolderId ? breadcrumbs[breadcrumbs.length-1]?.name : currentCustomer.name });
   currentFolderId = folder.id;
   loadFileView();
 }
-
 function navTo(idx) {
   // idx = -1 means root, 0..n means breadcrumb index
   if (idx < 0) {
@@ -387,7 +386,6 @@ function navTo(idx) {
   }
   loadFileView();
 }
-
 function renderBreadcrumb() {
   const el = document.getElementById("breadcrumb");
   let html = `<button class="bc-item${currentFolderId ? '' : ' cur'}" onclick="navTo(-1)">📁 ${esc(currentCustomer?.name || '')}</button>`;
@@ -396,7 +394,6 @@ function renderBreadcrumb() {
   });
   el.innerHTML = html;
 }
-
 // ── FOLDERS ──
 async function createFolder() {
   const name = document.getElementById("newFolderName").value.trim();
@@ -416,7 +413,6 @@ async function createFolder() {
     document.getElementById("createFolderBtn").disabled = false;
   }
 }
-
 // ── UPLOAD ──
 async function uploadFiles(files) {
   if (!currentCustomer) return;
@@ -425,7 +421,6 @@ async function uploadFiles(files) {
   const pct = document.getElementById("uploadPct");
   const label = document.getElementById("uploadLabel");
   bar.classList.add("show");
-
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
     const progress = Math.round((i / files.length) * 100);
@@ -452,7 +447,6 @@ async function uploadFiles(files) {
       toast(`❌ Failed to upload ${file.name}`, "err");
     }
   }
-
   fill.style.width = "100%";
   pct.textContent = "100%";
   label.textContent = "Upload complete!";
@@ -460,23 +454,19 @@ async function uploadFiles(files) {
   toast(`✅ ${files.length} file${files.length > 1 ? 's' : ''} uploaded!`, "ok");
   loadFileView();
 }
-
 // ── FILE ACTIONS ──
 async function previewFile(file) {
   const mime = file.mime_type || "";
   const isImage = mime.startsWith("image/");
   const isPDF = mime === "application/pdf";
-
   if (!isImage && !isPDF) {
     // Not previewable — download instead
     downloadFile(file);
     return;
   }
-
   document.getElementById("previewTitle").textContent = file.name;
   document.getElementById("previewContent").innerHTML = `<div style="padding:2rem;text-align:center;color:var(--text3);">Loading preview…</div>`;
   openModal("modalPreview");
-
   try {
     const url = `${WORKER_BASE}/api/files/download?id=${file.id}`;
     const headers = { "X-Registration-Code": regCode };
@@ -484,7 +474,6 @@ async function previewFile(file) {
     if (!res.ok) throw new Error("Could not load file");
     const blob = await res.blob();
     const objUrl = URL.createObjectURL(blob);
-
     if (isImage) {
       document.getElementById("previewContent").innerHTML = `<img class="preview-img" src="${objUrl}" alt="${esc(file.name)}">`;
     } else {
@@ -494,7 +483,6 @@ async function previewFile(file) {
     document.getElementById("previewContent").innerHTML = `<div style="padding:2rem;text-align:center;color:var(--red);">❌ Could not load preview.<br><small>${e.message}</small></div>`;
   }
 }
-
 async function downloadFile(file) {
   toast("⬇️ Downloading…");
   try {
@@ -513,7 +501,6 @@ async function downloadFile(file) {
     toast("❌ Download failed: " + e.message, "err");
   }
 }
-
 // ── RENAME ──
 async function doRename() {
   if (!renameTarget) return;
@@ -533,25 +520,187 @@ async function doRename() {
   }
   renameTarget = null;
 }
-
-// ── DELETE ──
+// ── DELETE (single, via context menu) ──
 async function doDelete() {
   if (!deleteTarget) return;
+  document.getElementById("deleteOkBtn").disabled = true;
+  document.getElementById("deleteOkBtn").textContent = "Deleting…";
   try {
-    if (deleteTarget.type === "folder") {
+    if (deleteTarget.type === "bulk") {
+      const items = deleteTarget.items;
+      let failed = 0;
+      for (const it of items) {
+        try {
+          if (it.type === "folder") await api("DELETE", `/api/folders?id=${it.data.id}`);
+          else await api("DELETE", `/api/files/delete?id=${it.data.id}`);
+        } catch (e) {
+          failed++;
+        }
+      }
+      closeModal("modalDelete");
+      if (failed) toast(`⚠️ Deleted ${items.length - failed} of ${items.length} — ${failed} failed`, "err");
+      else toast(`🗑️ Deleted ${items.length} item${items.length > 1 ? 's' : ''}`, "ok");
+      exitSelectMode();
+      loadFileView();
+    } else if (deleteTarget.type === "folder") {
       await api("DELETE", `/api/folders?id=${deleteTarget.data.id}`);
+      closeModal("modalDelete");
+      toast("🗑️ Deleted", "ok");
+      loadFileView();
     } else {
       await api("DELETE", `/api/files/delete?id=${deleteTarget.data.id}`);
+      closeModal("modalDelete");
+      toast("🗑️ Deleted", "ok");
+      loadFileView();
     }
-    closeModal("modalDelete");
-    toast("🗑️ Deleted", "ok");
-    loadFileView();
   } catch (e) {
     toast("❌ " + e.message, "err");
+  } finally {
+    document.getElementById("deleteOkBtn").disabled = false;
+    document.getElementById("deleteOkBtn").textContent = "Yes, Delete";
   }
   deleteTarget = null;
 }
-
+// ── BULK SELECT ──
+function toggleSelectMode() {
+  selectMode = !selectMode;
+  selectedItems.clear();
+  const btn = document.getElementById("selectModeBtn");
+  btn.textContent = selectMode ? "✕ Cancel Select" : "☑️ Select";
+  btn.classList.toggle("active", selectMode);
+  updateSelectBar();
+  renderFileView(lastFolders, lastFiles);
+}
+function exitSelectMode() {
+  selectMode = false;
+  selectedItems.clear();
+  const btn = document.getElementById("selectModeBtn");
+  if (btn) { btn.textContent = "☑️ Select"; btn.classList.remove("active"); }
+  updateSelectBar();
+}
+function toggleItemSelect(type, data) {
+  const key = type + ":" + data.id;
+  if (selectedItems.has(key)) selectedItems.delete(key);
+  else selectedItems.set(key, { type, data });
+  updateSelectBar();
+  renderFileView(lastFolders, lastFiles);
+}
+function selectAllInView() {
+  if (!selectMode) return;
+  lastFolders.forEach(f => selectedItems.set("folder:" + f.id, { type: "folder", data: f }));
+  lastFiles.forEach(f => selectedItems.set("file:" + f.id, { type: "file", data: f }));
+  updateSelectBar();
+  renderFileView(lastFolders, lastFiles);
+}
+function updateSelectBar() {
+  const bar = document.getElementById("selectBar");
+  if (!selectMode) { bar.classList.remove("show"); return; }
+  bar.classList.add("show");
+  const count = selectedItems.size;
+  document.getElementById("selectCount").textContent = count === 0 ? "Tap files or folders to select them" : `${count} selected`;
+  document.getElementById("selectDownloadBtn").disabled = count === 0;
+  document.getElementById("selectDeleteBtn").disabled = count === 0;
+}
+function confirmBulkDelete() {
+  const items = Array.from(selectedItems.values());
+  if (!items.length) return;
+  deleteTarget = { type: "bulk", items };
+  const fileCount = items.filter(i => i.type === "file").length;
+  const folderCount = items.filter(i => i.type === "folder").length;
+  const parts = [];
+  if (folderCount) parts.push(`${folderCount} folder${folderCount > 1 ? 's' : ''} (and everything inside)`);
+  if (fileCount) parts.push(`${fileCount} file${fileCount > 1 ? 's' : ''}`);
+  document.getElementById("deleteMsg").textContent = `Delete ${parts.join(" and ")}? This cannot be undone.`;
+  openModal("modalDelete");
+}
+// Recursively collects every file under a folder (for bulk download), preserving relative paths.
+async function collectFilesRecursive(customerId, folderId, pathPrefix) {
+  const [foldersData, filesData] = await Promise.all([
+    api("GET", `/api/folders?customer_id=${customerId}&parent_id=${folderId}`),
+    api("GET", `/api/files?customer_id=${customerId}&folder_id=${folderId}`),
+  ]);
+  let out = (filesData || []).map(f => ({ file: f, path: pathPrefix + f.name }));
+  for (const sub of (foldersData || [])) {
+    const nested = await collectFilesRecursive(customerId, sub.id, pathPrefix + sub.name + "/");
+    out = out.concat(nested);
+  }
+  return out;
+}
+async function bulkDownloadSelected() {
+  const items = Array.from(selectedItems.values());
+  if (!items.length) return;
+  // Single file selected, no folders — just download it directly, no zip needed.
+  if (items.length === 1 && items[0].type === "file") {
+    downloadFile(items[0].data);
+    return;
+  }
+  const dlBtn = document.getElementById("selectDownloadBtn");
+  dlBtn.disabled = true;
+  const bar = document.getElementById("uploadBar");
+  const fill = document.getElementById("uploadFill");
+  const pct = document.getElementById("uploadPct");
+  const label = document.getElementById("uploadLabel");
+  bar.classList.add("show");
+  label.textContent = "Preparing files…";
+  fill.style.width = "0%";
+  pct.textContent = "0%";
+  try {
+    // Build the full flat file list, recursing into any selected folders.
+    let allFiles = [];
+    for (const it of items) {
+      if (it.type === "file") {
+        allFiles.push({ file: it.data, path: it.data.name });
+      } else {
+        const nested = await collectFilesRecursive(currentCustomer.id, it.data.id, it.data.name + "/");
+        allFiles = allFiles.concat(nested);
+      }
+    }
+    if (!allFiles.length) {
+      toast("Nothing to download — selected folders are empty.", "err");
+      bar.classList.remove("show");
+      dlBtn.disabled = false;
+      return;
+    }
+    const zip = new JSZip();
+    for (let i = 0; i < allFiles.length; i++) {
+      const { file, path } = allFiles[i];
+      label.textContent = `Downloading ${i + 1} of ${allFiles.length}: ${file.name}`;
+      const pctVal = Math.round((i / allFiles.length) * 100);
+      fill.style.width = pctVal + "%";
+      pct.textContent = pctVal + "%";
+      try {
+        const res = await fetch(`${WORKER_BASE}/api/files/download?id=${file.id}`, {
+          headers: { "X-Registration-Code": regCode },
+        });
+        if (!res.ok) continue;
+        const blob = await res.blob();
+        zip.file(path, blob);
+      } catch (e) {
+        // skip files that fail to fetch, continue with the rest
+      }
+    }
+    label.textContent = "Zipping files…";
+    fill.style.width = "95%";
+    pct.textContent = "95%";
+    const zipBlob = await zip.generateAsync({ type: "blob" });
+    fill.style.width = "100%";
+    pct.textContent = "100%";
+    label.textContent = "Download ready!";
+    const url = URL.createObjectURL(zipBlob);
+    const a = document.createElement("a");
+    a.href = url;
+    const zipName = (items.length === 1 ? items[0].data.name : (currentCustomer?.name || "files")).replace(/[^a-z0-9]+/gi, "_");
+    a.download = `${zipName}.zip`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast(`✅ Downloaded ${allFiles.length} file${allFiles.length > 1 ? 's' : ''}`, "ok");
+  } catch (e) {
+    toast("❌ Download failed: " + e.message, "err");
+  } finally {
+    setTimeout(() => bar.classList.remove("show"), 1200);
+    dlBtn.disabled = false;
+  }
+}
 // ── GLOBAL SEARCH ──
 async function globalSearch(q) {
   try {
@@ -562,7 +711,6 @@ async function globalSearch(q) {
     hideSearchResults();
   }
 }
-
 function showSearchResults(q, files, folders) {
   const el = document.getElementById("searchResults");
   if (!files.length && !folders.length) {
@@ -588,12 +736,10 @@ function showSearchResults(q, files, folders) {
   el.innerHTML = html;
   el.classList.add("show");
 }
-
 function hideSearchResults() {
   document.getElementById("searchResults").classList.remove("show");
   document.getElementById("globalSearch").value = "";
 }
-
 async function jumpToFolder(customerId, folderId) {
   hideSearchResults();
   const c = allCustomers.find(x => x.id === customerId);
@@ -601,6 +747,7 @@ async function jumpToFolder(customerId, folderId) {
     currentCustomer = c;
     currentFolderId = folderId;
     breadcrumbs = [{ id: null, name: c.name }];
+    exitSelectMode();
     document.getElementById("emptyState").style.display = "none";
     document.getElementById("fileBrowser").classList.add("show");
     document.getElementById("fcName").textContent = c.name;
@@ -609,7 +756,6 @@ async function jumpToFolder(customerId, folderId) {
     loadFileView();
   }
 }
-
 async function jumpToFile(customerId, folderId, fileId) {
   hideSearchResults();
   await jumpToFolder(customerId, folderId || "");
@@ -621,7 +767,6 @@ async function jumpToFile(customerId, folderId, fileId) {
     if (file) previewFile(file);
   } catch (e) {}
 }
-
 // ── CONTEXT MENU ──
 function showCtx(event, type, data) {
   event.stopPropagation();
@@ -638,12 +783,10 @@ function showCtx(event, type, data) {
   menu.style.top = y + "px";
   menu.classList.add("show");
 }
-
 function closeCtx() {
   document.getElementById("ctxMenu").classList.remove("show");
   ctxTarget = null;
 }
-
 // ── MODALS ──
 function openModal(id) {
   document.getElementById(id).classList.add("open");
@@ -653,12 +796,10 @@ function openModal(id) {
     if (input) input.focus();
   }, 100);
 }
-
 function closeModal(id) {
   document.getElementById(id).classList.remove("open");
 }
 window.closeModal = closeModal;
-
 // ── TOAST ──
 function toast(msg, type = "") {
   const t = document.getElementById("toast");
@@ -667,18 +808,15 @@ function toast(msg, type = "") {
   clearTimeout(t._timer);
   t._timer = setTimeout(() => { t.className = "toast"; }, 3000);
 }
-
 // ── HELPERS ──
 function initials(name) {
   return name.split(" ").filter(Boolean).map(w => w[0]).join("").toUpperCase().slice(0, 2);
 }
-
 function esc(s) {
   return (s == null ? "" : String(s))
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
-
 function formatSize(bytes) {
   if (!bytes) return "";
   if (bytes < 1024) return bytes + " B";
@@ -686,7 +824,6 @@ function formatSize(bytes) {
   if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + " MB";
   return (bytes / 1073741824).toFixed(2) + " GB";
 }
-
 function fileIcon(name) {
   const ext = (name.split(".").pop() || "").toLowerCase();
   if (["jpg","jpeg","png","gif","webp","heic","heif"].includes(ext)) return "🖼️";
