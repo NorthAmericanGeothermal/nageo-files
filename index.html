@@ -89,7 +89,10 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
 .btn-upload:hover{background:#1d5cb8;}
 .btn-camera{background:#7c3aed;color:#fff;}
 .btn-camera:hover{background:#6d28d9;}
-.file-content{flex:1;overflow-y:auto;padding:14px 18px;position:relative;}
+.btn-select{background:#eef2f7;color:var(--text2);}
+.btn-select:hover{background:#e2e8f0;}
+.btn-select.active{background:var(--navy);color:#fff;}
+.file-content{flex:1;overflow-y:auto;padding:14px 18px 90px;position:relative;}
 .drop-overlay{position:absolute;inset:0;background:rgba(46,115,212,.07);border:3px dashed var(--blue);border-radius:var(--radius);display:none;align-items:center;justify-content:center;z-index:10;flex-direction:column;gap:10px;pointer-events:none;}
 .drop-overlay.active{display:flex;}
 .drop-overlay-big{font-size:52px;}
@@ -99,12 +102,17 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
 .folder-card,.file-card{background:var(--surface);border:1.5px solid var(--border);border-radius:var(--radius);padding:16px 12px;cursor:pointer;transition:all .15s;display:flex;flex-direction:column;align-items:center;gap:8px;text-align:center;position:relative;user-select:none;}
 .folder-card:hover,.file-card:hover{border-color:var(--blue);box-shadow:var(--shadow);transform:translateY(-2px);}
 .folder-card:active,.file-card:active{transform:translateY(0);}
+.folder-card.card-selected,.file-card.card-selected{border-color:var(--blue);background:var(--blue-light);}
 .card-icon{font-size:38px;line-height:1;}
 .card-name{font-size:13px;font-weight:600;color:var(--text);word-break:break-word;line-height:1.3;max-height:2.8em;overflow:hidden;}
 .card-meta{font-size:11px;color:var(--text3);}
 .card-menu{position:absolute;top:7px;right:7px;background:none;border:none;font-size:17px;color:var(--text3);cursor:pointer;padding:3px 5px;border-radius:5px;opacity:0;transition:opacity .15s;line-height:1;}
 .folder-card:hover .card-menu,.file-card:hover .card-menu{opacity:1;}
 .card-menu:hover{background:var(--border);color:var(--text);opacity:1!important;}
+.card-checkbox{position:absolute;top:8px;left:8px;width:22px;height:22px;border-radius:6px;border:2px solid var(--border);background:#fff;z-index:2;}
+.card-checkbox.checked{background:var(--blue);border-color:var(--blue);display:flex;align-items:center;justify-content:center;}
+.card-checkbox.checked::after{content:'✓';color:#fff;font-size:13px;font-weight:800;}
+.file-content.select-mode .card-menu{display:none!important;}
 .folder-empty-area{padding:3rem 1rem;text-align:center;color:var(--text3);}
 .folder-empty-icon{font-size:52px;margin-bottom:12px;opacity:.4;}
 .folder-empty-strong{font-size:17px;font-weight:700;color:var(--text2);margin-bottom:6px;}
@@ -123,22 +131,19 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
 .upload-bar-track{height:6px;background:var(--border);border-radius:3px;overflow:hidden;}
 .upload-bar-fill{height:100%;background:var(--blue);border-radius:3px;transition:width .2s;}
 .upload-bar-pct{font-size:12px;color:var(--text2);margin-top:4px;}
-.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:400;display:none;align-items:center;justify-content:center;padding:1rem;backdrop-filter:blur(3px);}
-.modal-bg.open{display:flex;}
-.modal{background:#fff;border-radius:20px;width:100%;max-width:440px;box-shadow:var(--shadow-lg);overflow:hidden;}
-.modal-hdr{padding:20px 24px 0;display:flex;align-items:center;justify-content:space-between;}
-.modal-title{font-size:18px;font-weight:700;color:var(--text);}
-.modal-close{background:none;border:none;font-size:22px;color:var(--text3);cursor:pointer;line-height:1;padding:2px;}
-.modal-body{padding:20px 24px 24px;}
-.modal-label{font-size:13px;font-weight:600;color:var(--text2);margin-bottom:7px;display:block;}
-.modal-input{width:100%;padding:13px 16px;border:2px solid var(--border);border-radius:var(--radius-sm);font-size:15px;font-family:inherit;color:var(--text);background:#f8fafc;transition:border-color .2s;}
-.modal-input:focus{outline:none;border-color:var(--blue);background:#fff;}
-.modal-btns{display:flex;gap:10px;margin-top:18px;}
-.modal-cancel{flex:1;padding:13px;border:1.5px solid var(--border);border-radius:var(--radius-sm);background:#fff;color:var(--text2);font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;}
-.modal-ok{flex:2;padding:13px;border:none;border-radius:var(--radius-sm);background:var(--navy);color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit;}
-.modal-ok:hover{background:var(--navy2);}
-.modal-danger{background:var(--red);}
-.modal-danger:hover{background:#b91c1c;}
+.select-bar{position:fixed;bottom:0;left:0;right:0;background:var(--navy);color:#fff;padding:12px 20px;display:none;align-items:center;gap:14px;z-index:210;box-shadow:0 -4px 16px rgba(0,0,0,.2);flex-wrap:wrap;}
+.select-bar.show{display:flex;}
+.select-bar-info{flex:1;font-size:14px;font-weight:600;display:flex;align-items:center;gap:14px;min-width:160px;}
+.select-all-link{background:none;border:none;color:#8ec1ff;font-size:13px;font-weight:600;cursor:pointer;text-decoration:underline;font-family:inherit;padding:0;}
+.select-bar-btns{display:flex;gap:8px;flex-wrap:wrap;}
+.select-bar-btns .action-btn{padding:9px 14px;}
+.btn-cancel-select{background:rgba(255,255,255,.15);color:#fff;}
+.btn-cancel-select:hover{background:rgba(255,255,255,.25);}
+.btn-download-sel{background:var(--blue);color:#fff;}
+.btn-download-sel:hover{background:#1d5cb8;}
+.btn-delete-sel{background:var(--red);color:#fff;}
+.btn-delete-sel:hover{background:#b91c1c;}
+.btn-download-sel:disabled,.btn-delete-sel:disabled{opacity:.4;cursor:default;}
 .preview-content{padding:16px 20px 20px;}
 .preview-img{max-width:100%;border-radius:8px;display:block;margin:0 auto;}
 .preview-pdf{width:75vw;height:75vh;border:none;border-radius:8px;}
@@ -165,14 +170,16 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
   .topbar-search{display:none;}
   .file-grid{grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;}
   .file-header{padding:10px 12px 10px;}
-  .file-content{padding:10px 12px;}
+  .file-content{padding:10px 12px 90px;}
   .action-btn{padding:8px 12px;font-size:13px;}
   .preview-pdf{width:90vw;height:60vh;}
+  .select-bar{flex-direction:column;align-items:stretch;}
+  .select-bar-btns{justify-content:stretch;}
+  .select-bar-btns .action-btn{flex:1;justify-content:center;}
 }
 </style>
 </head>
 <body>
-
 <!-- REGISTRATION -->
 <div class="reg-screen" id="regScreen">
   <div class="reg-card">
@@ -189,7 +196,6 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
     <div class="reg-help">Contact your office manager if you need the registration code.</div>
   </div>
 </div>
-
 <!-- APP -->
 <div id="app">
   <div class="topbar">
@@ -204,7 +210,6 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
       <button class="topbar-btn" id="signOutBtn">Sign out</button>
     </div>
   </div>
-
   <div class="app-body">
     <div class="sidebar" id="sidebar">
       <div class="sidebar-header">
@@ -218,14 +223,12 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
         <div class="sidebar-msg">Loading customers…</div>
       </div>
     </div>
-
     <div class="file-area">
       <div class="file-empty-state" id="emptyState">
         <div class="file-empty-icon">📂</div>
         <div class="file-empty-title">Pick a Customer</div>
         <div class="file-empty-sub">Search for a customer on the left, then tap their name to view and manage their files.</div>
       </div>
-
       <div id="fileBrowser">
         <div class="file-header">
           <div class="file-customer-name" id="fcName"></div>
@@ -235,6 +238,7 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
             <button class="action-btn btn-folder" id="newFolderBtn">📁 New Folder</button>
             <button class="action-btn btn-upload" id="uploadBtn">⬆️ Upload Files</button>
             <button class="action-btn btn-camera" id="cameraBtn">📷 Take Photo</button>
+            <button class="action-btn btn-select" id="selectModeBtn">☑️ Select</button>
           </div>
         </div>
         <div class="file-content" id="fileContent">
@@ -247,10 +251,8 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
     </div>
   </div>
 </div>
-
 <input type="file" id="fileInput" multiple style="display:none" accept="*/*">
 <input type="file" id="cameraInput" capture="environment" accept="image/*,video/*" style="display:none">
-
 <!-- Upload bar -->
 <div class="upload-bar" id="uploadBar">
   <div style="font-size:28px">⬆️</div>
@@ -260,7 +262,18 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
     <div class="upload-bar-pct" id="uploadPct">0%</div>
   </div>
 </div>
-
+<!-- Bulk select bar -->
+<div class="select-bar" id="selectBar">
+  <div class="select-bar-info">
+    <span id="selectCount">Tap files or folders to select them</span>
+    <button class="select-all-link" id="selectAllBtn">Select all</button>
+  </div>
+  <div class="select-bar-btns">
+    <button class="action-btn btn-cancel-select" id="selectCancelBtn">✕ Cancel</button>
+    <button class="action-btn btn-download-sel" id="selectDownloadBtn" disabled>⬇️ Download</button>
+    <button class="action-btn btn-delete-sel" id="selectDeleteBtn" disabled>🗑️ Delete</button>
+  </div>
+</div>
 <!-- Context menu -->
 <div class="ctx-menu" id="ctxMenu">
   <button class="ctx-item" id="ctxOpen">📂 Open</button>
@@ -270,7 +283,6 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
   <div class="ctx-div"></div>
   <button class="ctx-item danger" id="ctxDelete">🗑️ Delete</button>
 </div>
-
 <!-- New Folder Modal -->
 <div class="modal-bg" id="modalNewFolder">
   <div class="modal">
@@ -288,7 +300,6 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
     </div>
   </div>
 </div>
-
 <!-- Rename Modal -->
 <div class="modal-bg" id="modalRename">
   <div class="modal">
@@ -306,7 +317,6 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
     </div>
   </div>
 </div>
-
 <!-- Delete Modal -->
 <div class="modal-bg" id="modalDelete">
   <div class="modal">
@@ -323,7 +333,6 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
     </div>
   </div>
 </div>
-
 <!-- Preview Modal -->
 <div class="modal-bg" id="modalPreview" onclick="if(event.target===this)closeModal('modalPreview')">
   <div class="modal" style="max-width:92vw;width:auto;">
@@ -334,10 +343,9 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
     <div class="preview-content" id="previewContent"></div>
   </div>
 </div>
-
 <!-- Toast -->
 <div class="toast" id="toast"></div>
-
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
