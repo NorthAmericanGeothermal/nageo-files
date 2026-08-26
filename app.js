@@ -1,4 +1,4 @@
-// NAGeo Files — app.js (Supabase-backed — replaces the old Cloudflare Worker) . 
+// NAGeo Files — app.js (Supabase-backed — replaces the old Cloudflare Worker)
 const SUPABASE_URL = "https://hpgwwegjsxyxovdattoc.supabase.co";
 const SUPABASE_KEY = "sb_publishable_D2PqYQoJjZ8koEM9NPvmeg_KB_Wa66H";
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -1119,30 +1119,58 @@ function threadFolderName(subject, firstDate) {
 }
 // Saves every not-yet-saved message in `results` into customerId's locked
 // Emails folder, grouped into one locked subfolder per email thread (see
-// getOrCreateThreadFolder) — de-duped against gmail_message_id (both against
-// what's already in the DB and within this batch). Returns how many were
-// newly saved. Safe to call repeatedly with overlapping/duplicate result
-// sets — that's the whole point, since a re-run of Search Emails will
-// re-find messages already archived from a previous search. It also
-// self-heals: any message saved before thread grouping existed (sitting
-// flat in the Emails folder with no thread id) gets backfilled and moved
-// into its correct thread subfolder the next time it turns up in a search.
+// getOrCreateThreadFolder). Returns how many were newly saved. Safe to call
+// repeatedly with overlapping/duplicate result sets — that's the whole
+// point, since a re-run of Search Emails will re-find messages already
+// archived from a previous search. It also self-heals: any message saved
+// before thread grouping existed (sitting flat in the Emails folder with no
+// thread id) gets backfilled and moved into its correct thread subfolder the
+// next time it turns up in a search.
+//
+// TWO layers of de-dup, because one message can repeat two different ways:
+//   1. gmail_message_id — the exact same result turning up again from the
+//      SAME connected account (e.g. a later search pass, or a re-run).
+//   2. rfc822_message_id — the real Message-ID header, set once by the
+//      sending server and identical on every copy of an email everywhere it
+//      lands. This is what catches the SAME physical email arriving via a
+//      DIFFERENT connected account (cc'd, forwarded between reps, etc.) —
+//      Gmail assigns that copy its own distinct gmail_message_id AND its own
+//      gmail_thread_id, so without this check it would save as a second
+//      file in a second, disconnected thread folder instead of being
+//      recognized as the same email.
 async function saveEmailsToFolder(customerId, results) {
   if (!results || !results.length) return 0;
   const emailsFolder = await getOrCreateEmailsFolder(customerId);
-  const ids = results.map(function (r) { return r.gmail_message_id; }).filter(Boolean);
+  const msgIds = results.map(function (r) { return r.gmail_message_id; }).filter(Boolean);
+  const rfcIds = results.map(function (r) { return r.rfc822_message_id; }).filter(Boolean);
   let existingByMsgId = {};
-  if (ids.length) {
-    const { data: existingRows, error: existErr } = await sb.from("nageo_files_files")
-      .select("id, gmail_message_id, folder_id").eq("customer_id", customerId).in("gmail_message_id", ids);
+  let existingByRfcId = {};
+  if (msgIds.length || rfcIds.length) {
+    let q = sb.from("nageo_files_files").select("id, gmail_message_id, rfc822_message_id, folder_id").eq("customer_id", customerId);
+    const orParts = [];
+    if (msgIds.length) orParts.push("gmail_message_id.in.(" + msgIds.map(function (id) { return '"' + id.replace(/"/g, '\\"') + '"'; }).join(",") + ")");
+    if (rfcIds.length) orParts.push("rfc822_message_id.in.(" + rfcIds.map(function (id) { return '"' + id.replace(/"/g, '\\"') + '"'; }).join(",") + ")");
+    const { data: existingRows, error: existErr } = await q.or(orParts.join(","));
     if (existErr) throw existErr;
-    (existingRows || []).forEach(function (row) { existingByMsgId[row.gmail_message_id] = row; });
+    (existingRows || []).forEach(function (row) {
+      if (row.gmail_message_id) existingByMsgId[row.gmail_message_id] = row;
+      if (row.rfc822_message_id) existingByRfcId[row.rfc822_message_id] = row;
+    });
   }
   var threadFolderCache = {};
   let savedCount = 0;
   for (const r of results) {
     if (!r.gmail_message_id) continue;
-    var existing = existingByMsgId[r.gmail_message_id];
+    // Exact same account+message re-turning-up — safe to backfill/regroup,
+    // it's genuinely the same saved copy.
+    var existingSameCopy = existingByMsgId[r.gmail_message_id];
+    // Same physical email, but a DIFFERENT account's copy of it — this is a
+    // true duplicate. Never move the original for this case (its folder is
+    // correct for whichever account it was first saved under); just skip.
+    var existingCrossAccountDup = (!existingSameCopy && r.rfc822_message_id) ? existingByRfcId[r.rfc822_message_id] : null;
+
+    if (existingCrossAccountDup) continue;
+
     var targetFolder = emailsFolder;
     if (r.gmail_thread_id && r.account) {
       try {
@@ -1152,17 +1180,17 @@ async function saveEmailsToFolder(customerId, results) {
         targetFolder = emailsFolder;
       }
     }
-    if (existing) {
+    if (existingSameCopy) {
       // Already saved — if it's sitting somewhere other than its correct
       // thread folder (e.g. saved flat before threading existed), move it
       // and backfill its thread id now that we know it.
-      if (existing.folder_id !== targetFolder.id) {
+      if (existingSameCopy.folder_id !== targetFolder.id) {
         try {
           await sb.from("nageo_files_files").update({
             folder_id: targetFolder.id,
             gmail_thread_id: r.gmail_thread_id || null,
             updated_at: new Date().toISOString(),
-          }).eq("id", existing.id);
+          }).eq("id", existingSameCopy.id);
         } catch (e) { console.warn("Failed to regroup existing saved email:", r.subject, e); }
       }
       continue;
@@ -1185,15 +1213,24 @@ async function saveEmailsToFolder(customerId, results) {
         gmail_message_id: r.gmail_message_id,
         gmail_account: r.account || null,
         gmail_thread_id: r.gmail_thread_id || null,
+        rfc822_message_id: r.rfc822_message_id || null,
       });
       if (insErr) {
-        // 23505 = unique violation on (customer_id, gmail_message_id) — a
-        // concurrent search already saved this exact message a moment ago.
-        // Clean up the storage object we just uploaded and move on quietly.
+        // 23505 = unique violation — either the same (customer_id,
+        // gmail_message_id) or the same (customer_id, rfc822_message_id),
+        // meaning a concurrent search (or another account's copy landing at
+        // the same moment) already saved this exact email a beat ago. Clean
+        // up the storage object we just uploaded and move on quietly.
         await sb.storage.from(STORAGE_BUCKET).remove([storagePath]);
         if (insErr.code !== "23505") throw insErr;
         continue;
       }
+      // Update the in-batch caches so a duplicate of THIS message later in
+      // the same batch (e.g. a different account's copy found in the same
+      // search pass) is recognized immediately, without a second DB round
+      // trip and without waiting for saveEmailsToFolder to be called again.
+      existingByMsgId[r.gmail_message_id] = { id: null, gmail_message_id: r.gmail_message_id, folder_id: targetFolder.id };
+      if (r.rfc822_message_id) existingByRfcId[r.rfc822_message_id] = { id: null, rfc822_message_id: r.rfc822_message_id, folder_id: targetFolder.id };
       savedCount++;
     } catch (e) {
       console.warn("Failed to save email to Emails folder:", r.subject, e);
