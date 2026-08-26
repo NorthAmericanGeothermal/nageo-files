@@ -11,6 +11,11 @@ const REG_KEY = "nageo_files_reg";
 // account connected from Files shows up in GRECs/Leads too, and vice versa.
 const GOOGLE_CLIENT_ID = "924555050056-jp3k8vpo89tb14vfghjqefrb1aaik21e.apps.googleusercontent.com";
 const GOOGLE_OAUTH_REDIRECT_URI = SUPABASE_URL + "/functions/v1/lead-gmail-oauth";
+// gmail_accounts.rep_id is a uuid column — lead-gmail-oauth's callback
+// writes whatever comes back as `state` straight into it, so it has to be a
+// real UUID. Files doesn't have per-user logins/real reps, so every account
+// connected from this tool shares this one fixed placeholder id.
+const NAGEO_FILES_PLACEHOLDER_REP_ID = "8e8f3f0a-9c1e-4b2a-9f3d-4e1c2b6a7d10";
 // Name of the protected, auto-created folder each customer gets the first
 // time a saved search email needs somewhere to live. Locked — the app
 // blocks renaming/deleting/moving it or its contents, and blocks manual
@@ -1119,13 +1124,14 @@ function connectGmailAccount() {
     // Same scope set GRECs' connect flow requests, so an account connected
     // from either tool ends up with identical permissions in the shared pool.
     scope: "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.metadata https://www.googleapis.com/auth/gmail.send",
-    // lead-gmail-oauth's callback requires a non-empty state (it uses this
-    // as rep_id and errors with "Missing code or rep id from Google" if it's
-    // blank — Files has no per-user login to supply a real one, so this is
-    // just a stable placeholder marking accounts connected from this tool.
-    // It's metadata only; every tool still searches the whole shared pool
-    // regardless of which rep_id an account was connected under.
-    state: "nageo-files",
+    // lead-gmail-oauth's callback requires a non-empty state — it uses this
+    // as rep_id, stored as a uuid column, so it has to be a real UUID (a
+    // plain string like "nageo-files" fails with "invalid input syntax for
+    // type uuid"). Files has no per-user login to supply a real rep's id, so
+    // this is a fixed placeholder UUID marking accounts connected from this
+    // tool. It's metadata only — every tool still searches the whole shared
+    // pool regardless of which rep_id an account was connected under.
+    state: NAGEO_FILES_PLACEHOLDER_REP_ID,
   });
   window.open("https://accounts.google.com/o/oauth2/v2/auth?" + params.toString(), "_blank");
   toast("Complete the Google sign-in in the new tab, then come back and click Refresh List.", "ok");
