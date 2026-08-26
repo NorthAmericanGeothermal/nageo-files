@@ -93,6 +93,10 @@ function wireEvents() {
   document.getElementById("selectDeleteBtn").addEventListener("click", confirmBulkDelete);
   // Search emails
   document.getElementById("searchEmailBtn").addEventListener("click", openSearchEmailsModal);
+  document.getElementById("searchEmailsAddBtn").addEventListener("click", addSearchEmail);
+  document.getElementById("searchEmailsAddInput").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); addSearchEmail(); } });
+  document.getElementById("searchEmailsGoBtn").addEventListener("click", function () { startEmailSearch(); });
+  document.getElementById("searchEmailsStopBtn").addEventListener("click", function () { emailSearchCancelled = true; });
   // Drag and drop (file system → upload)
   const fc = document.getElementById("fileContent");
   fc.addEventListener("dragover", e => { e.preventDefault(); document.getElementById("dropOverlay").classList.add("active"); });
@@ -862,40 +866,157 @@ async function jumpToFile(customerId, folderId, fileId) {
   } catch (e) {}
 }
 // ── SEARCH EMAILS — on-demand Gmail search across the shared connected-
-// account pool for the current customer's email address. Nothing is
-// stored; this just searches live at the moment the button is clicked. ──
+// account pool for every email address on file for this customer. Nothing
+// is stored; this searches live each time "Search Now" is clicked. Multi-
+// pass pagination (same pattern as the Leads tool's email sync) means one
+// click walks through every page of Gmail results instead of stopping at
+// an arbitrary cap — the Edge Function hands back a `cursors` object each
+// pass, and this loop keeps calling it until every connected account is
+// exhausted or the safety limit of passes is hit. ──
+var searchEmailsCustomerId = null;
+var searchEmailsList = []; // [{email, source:'hcp'|'manual'}]
+var emailSearchCancelled = false;
+var emailSearchRunning = false;
+
 async function openSearchEmailsModal() {
   if (!currentCustomer) return;
-  const body = document.getElementById("searchEmailsBody");
-  var email = (currentCustomer.email || "").trim();
-  if (!email) {
-    body.innerHTML = '<div class="se-empty">No email address on file for ' + esc(currentCustomer.name) + ' — nothing to search for.</div>';
-    openModal("modalSearchEmails");
+  searchEmailsCustomerId = currentCustomer.id;
+  document.getElementById("searchEmailsAddInput").value = "";
+  document.getElementById("searchEmailsResults").innerHTML = "";
+  document.getElementById("searchEmailsProgress").style.display = "none";
+  await loadSearchEmailsList();
+  renderSearchEmailsList();
+  openModal("modalSearchEmails");
+  if (searchEmailsList.length) startEmailSearch();
+}
+async function loadSearchEmailsList() {
+  searchEmailsList = [];
+  var hcpEmail = (currentCustomer.email || "").trim();
+  if (hcpEmail) searchEmailsList.push({ email: hcpEmail, source: "hcp" });
+  try {
+    const { data, error } = await sb.from("nageo_files_manual_emails").select("*").eq("customer_id", searchEmailsCustomerId).order("created_at");
+    if (!error && data) {
+      data.forEach(function (row) {
+        if (!searchEmailsList.some(function (e) { return e.email.toLowerCase() === row.email.toLowerCase(); })) {
+          searchEmailsList.push({ email: row.email, source: "manual" });
+        }
+      });
+    }
+  } catch (e) { /* non-fatal — just search whatever we already have */ }
+}
+function renderSearchEmailsList() {
+  var el = document.getElementById("searchEmailsList");
+  if (!searchEmailsList.length) {
+    el.innerHTML = '<div class="se-empty" style="padding:1rem 0;">No email address on file yet — add one below to search for it.</div>';
     return;
   }
-  body.innerHTML = '<div class="se-meta">Searching every connected Gmail account for messages to/from <strong>' + esc(email) + '</strong>…</div><div class="se-empty">Searching…</div>';
-  openModal("modalSearchEmails");
+  el.innerHTML = searchEmailsList.map(function (e) {
+    return '<div class="se-email-row">'
+      + '<span class="se-email-addr">' + esc(e.email) + '</span>'
+      + '<span class="se-email-src">' + (e.source === "hcp" ? "from HCP" : "added manually") + '</span>'
+      + (e.source === "manual" ? '<button class="se-email-remove" onclick="removeSearchEmail(\'' + esc(e.email).replace(/'/g, "\\'") + '\')" title="Remove">✕</button>' : '')
+      + '</div>';
+  }).join("");
+}
+async function addSearchEmail() {
+  var input = document.getElementById("searchEmailsAddInput");
+  var val = (input.value || "").trim().toLowerCase();
+  if (!val) return;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val)) { toast("That doesn't look like a valid email address.", "err"); return; }
+  if (searchEmailsList.some(function (e) { return e.email.toLowerCase() === val; })) { toast("That email is already in the list.", "err"); input.value = ""; return; }
   try {
-    const res = await fetch(SEARCH_EMAILS_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + SUPABASE_KEY, "apikey": SUPABASE_KEY },
-      body: JSON.stringify({ emails: [email] }),
-    });
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
-    renderSearchEmailsResults(email, data.results || [], data.accounts_searched || 0, data.note || null);
+    const { error } = await sb.from("nageo_files_manual_emails").insert({ customer_id: searchEmailsCustomerId, email: val });
+    if (error && error.code !== "23505") throw error; // 23505 = unique violation, harmless race, ignore
   } catch (e) {
-    body.innerHTML = '<div class="se-empty">❌ Could not search — ' + esc(e.message) + '</div>';
+    toast("Could not save that email: " + e.message, "err");
+    return;
+  }
+  searchEmailsList.push({ email: val, source: "manual" });
+  input.value = "";
+  renderSearchEmailsList();
+  toast("Email added — click Search Now to include it.", "ok");
+}
+async function removeSearchEmail(email) {
+  try {
+    await sb.from("nageo_files_manual_emails").delete().eq("customer_id", searchEmailsCustomerId).ilike("email", email);
+  } catch (e) { /* best-effort */ }
+  searchEmailsList = searchEmailsList.filter(function (e) { return e.email.toLowerCase() !== email.toLowerCase(); });
+  renderSearchEmailsList();
+}
+async function startEmailSearch() {
+  if (emailSearchRunning) return;
+  if (!searchEmailsList.length) { toast("Add an email address to search for first.", "err"); return; }
+  emailSearchRunning = true;
+  emailSearchCancelled = false;
+  var emails = searchEmailsList.map(function (e) { return e.email; });
+  var progressBox = document.getElementById("searchEmailsProgress");
+  var progressText = document.getElementById("searchEmailsProgressText");
+  var stopBtn = document.getElementById("searchEmailsStopBtn");
+  var goBtn = document.getElementById("searchEmailsGoBtn");
+  var resultsBox = document.getElementById("searchEmailsResults");
+  progressBox.style.display = "block";
+  stopBtn.textContent = "Stop after this pass";
+  stopBtn.disabled = false;
+  goBtn.disabled = true;
+  resultsBox.innerHTML = "";
+  progressText.textContent = "Starting…";
+
+  var allResults = [];
+  var seen = {};
+  var cursors = {};
+  var pass = 0;
+  var MAX_PASSES = 25; // safety valve so a stuck account can't loop forever
+  var accountsSearched = 0;
+  var stoppedReason = null;
+
+  try {
+    while (pass < MAX_PASSES) {
+      pass++;
+      progressText.textContent = "Pass " + pass + ": searching connected Gmail accounts…";
+      var data;
+      try {
+        const res = await fetch(SEARCH_EMAILS_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": "Bearer " + SUPABASE_KEY, "apikey": SUPABASE_KEY },
+          body: JSON.stringify({ emails: emails, cursors: cursors }),
+        });
+        data = await res.json();
+      } catch (e) {
+        stoppedReason = "Search failed: " + e.message;
+        break;
+      }
+      if (data.error) { stoppedReason = "Search failed: " + data.error; break; }
+      accountsSearched = data.accounts_searched || accountsSearched;
+      (data.results || []).forEach(function (r) {
+        var key = r.account + ":" + r.gmail_message_id;
+        if (seen[key]) return;
+        seen[key] = true;
+        allResults.push(r);
+      });
+      cursors = data.cursors || {};
+      allResults.sort(function (a, b) { return (b.date || "").localeCompare(a.date || ""); });
+      renderSearchEmailsResultsList(allResults, accountsSearched);
+      progressText.textContent = allResults.length + " message" + (allResults.length === 1 ? "" : "s") + " found so far — pass " + pass + ".";
+      if (data.note) { stoppedReason = data.note; break; }
+      if (emailSearchCancelled) { stoppedReason = "Stopped early at your request."; break; }
+      if (!data.has_more) { stoppedReason = null; break; }
+    }
+    if (pass >= MAX_PASSES && !stoppedReason) stoppedReason = "Stopped after " + MAX_PASSES + " passes as a safety limit.";
+  } finally {
+    progressBox.style.display = "none";
+    goBtn.disabled = false;
+    emailSearchRunning = false;
+  }
+  if (!allResults.length && !stoppedReason) {
+    document.getElementById("searchEmailsResults").innerHTML = '<div class="se-empty">No emails found for any address on this list, across ' + accountsSearched + ' connected account' + (accountsSearched === 1 ? '' : 's') + '.</div>';
+  } else if (stoppedReason) {
+    toast(stoppedReason, "err");
   }
 }
-function renderSearchEmailsResults(email, results, accountsSearched, note) {
-  const body = document.getElementById("searchEmailsBody");
-  var metaHtml = '<div class="se-meta">' + results.length + ' message' + (results.length === 1 ? '' : 's') + ' found across ' + accountsSearched + ' connected account' + (accountsSearched === 1 ? '' : 's') + ' for <strong>' + esc(email) + '</strong>.</div>';
-  if (note) metaHtml = '<div class="se-meta">' + esc(note) + '</div>';
-  if (!results.length) {
-    body.innerHTML = metaHtml + '<div class="se-empty">No emails found for this address in any connected Gmail account.</div>';
-    return;
-  }
+function renderSearchEmailsResultsList(results, accountsSearched) {
+  var box = document.getElementById("searchEmailsResults");
+  if (!results.length) { box.innerHTML = ""; return; }
+  var metaHtml = '<div class="se-meta">' + results.length + ' message' + (results.length === 1 ? '' : 's') + ' found across ' + accountsSearched + ' connected account' + (accountsSearched === 1 ? '' : 's') + '.</div>';
   var html = metaHtml + '<div class="se-tiles">';
   results.forEach(function (r, idx) {
     var dateStr = r.date ? new Date(r.date).toLocaleString() : '';
@@ -909,7 +1030,7 @@ function renderSearchEmailsResults(email, results, accountsSearched, note) {
       + '</div>';
   });
   html += '</div>';
-  body.innerHTML = html;
+  box.innerHTML = html;
   results.forEach(function (r, idx) {
     var frame = document.getElementById('se-frame-' + idx);
     if (!frame) return;
