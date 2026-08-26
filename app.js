@@ -1,8 +1,10 @@
-// NAGeo Files — app.js
-// Update WORKER_BASE after deploying your Cloudflare Worker
-const WORKER_BASE = "https://nageo-files.nagprospects.workers.dev";
+// NAGeo Files — app.js (Supabase-backed — replaces the old Cloudflare Worker)
+const SUPABASE_URL = "https://hpgwwegjsxyxovdattoc.supabase.co";
+const SUPABASE_KEY = "sb_publishable_D2PqYQoJjZ8koEM9NPvmeg_KB_Wa66H";
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+const HCP_CUSTOMERS_URL = SUPABASE_URL + "/functions/v1/nageo-files-hcp-customers";
+const STORAGE_BUCKET = "nageo-files-documents";
 const REG_KEY = "nageo_files_reg";
-const REG_CODE = "NAG-7X4K2-9M1PW-3Q8";
 // ── STATE ──
 let regCode = localStorage.getItem(REG_KEY) || "";
 let allCustomers = [];
@@ -19,9 +21,11 @@ let selectMode = false;
 let selectedItems = new Map(); // key "folder:id" or "file:id" -> {type, data}
 let lastFolders = [];
 let lastFiles = [];
+// Drag & drop move state
+let dragData = null; // {type, id, name}
 // ── INIT ──
 document.addEventListener("DOMContentLoaded", () => {
-  if (regCode === REG_CODE) {
+  if (regCode) {
     showApp();
   } else {
     showReg();
@@ -86,7 +90,7 @@ function wireEvents() {
   document.getElementById("selectCancelBtn").addEventListener("click", () => { if (selectMode) toggleSelectMode(); });
   document.getElementById("selectDownloadBtn").addEventListener("click", bulkDownloadSelected);
   document.getElementById("selectDeleteBtn").addEventListener("click", confirmBulkDelete);
-  // Drag and drop
+  // Drag and drop (file system → upload)
   const fc = document.getElementById("fileContent");
   fc.addEventListener("dragover", e => { e.preventDefault(); document.getElementById("dropOverlay").classList.add("active"); });
   fc.addEventListener("dragleave", e => { if (!fc.contains(e.relatedTarget)) document.getElementById("dropOverlay").classList.remove("active"); });
@@ -146,17 +150,14 @@ async function tryRegister() {
   document.getElementById("regBtn").textContent = "Checking…";
   document.getElementById("regBtn").disabled = true;
   try {
-    const res = await fetch(`${WORKER_BASE}/api/validate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code: input }),
-    });
-    const data = await res.json();
-    if (data.ok) {
-      localStorage.setItem(REG_KEY, input);
-      regCode = input;
+    const { data, error } = await sb.from("nageo_files_settings").select("registration_code").eq("id", 1).single();
+    if (error) throw error;
+    if (data && data.registration_code === input) {
+      localStorage.setItem(REG_KEY, "true");
+      regCode = "true";
       showApp();
     } else {
+      document.getElementById("regErr").textContent = "❌ That code isn't right. Please try again or ask your manager.";
       document.getElementById("regErr").style.display = "block";
     }
   } catch (e) {
@@ -176,40 +177,16 @@ function showApp() {
   document.getElementById("app").classList.add("visible");
   loadCustomers();
 }
-// ── API HELPER ──
-async function api(method, path, body = null, isFile = false) {
-  const opts = {
-    method,
-    headers: { "X-Registration-Code": regCode },
-  };
-  if (body && !isFile) {
-    opts.headers["Content-Type"] = "application/json";
-    opts.body = JSON.stringify(body);
-  } else if (body && isFile) {
-    opts.body = body; // ReadableStream for file upload
-  }
-  const res = await fetch(`${WORKER_BASE}${path}`, opts);
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || `Request failed (${res.status})`);
-  }
-  return res.json();
-}
 // ── CUSTOMERS ──
 async function loadCustomers() {
   document.getElementById("customerList").innerHTML = '<div class="sidebar-msg">Loading customers from HCP…<br><small style="opacity:.6">This may take a moment</small></div>';
   try {
-    // Load page by page until we have all customers with 5-digit IDs
-    let page = 1;
-    let all = [];
-    while (true) {
-      const data = await api("GET", `/api/customers?page=${page}`);
-      all = all.concat(data.customers || []);
-      if (!data.customers || data.customers.length < 50) break;
-      page++;
-      if (page > 20) break; // safety cap
-    }
-    // Sort by name
+    const res = await fetch(HCP_CUSTOMERS_URL, {
+      headers: { "Authorization": "Bearer " + SUPABASE_KEY, "apikey": SUPABASE_KEY },
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    let all = data.customers || [];
     all.sort((a, b) => a.name.localeCompare(b.name));
     allCustomers = all;
     filteredCustomers = all;
@@ -217,6 +194,10 @@ async function loadCustomers() {
   } catch (e) {
     document.getElementById("customerList").innerHTML = `<div class="sidebar-msg">❌ Could not load customers.<br><small>${e.message}</small><br><br><button onclick="loadCustomers()" style="padding:8px 16px;background:var(--blue);color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:13px;">Try Again</button></div>`;
   }
+}
+function customerTagFor(customerId) {
+  const c = allCustomers.find(x => x.id === customerId);
+  return c ? c.customer_id : customerId;
 }
 function filterCustomers(q) {
   if (!q.trim()) {
@@ -280,12 +261,23 @@ async function loadFileView() {
   `;
   rewireDrop();
   try {
-    const [foldersData, filesData] = await Promise.all([
-      api("GET", `/api/folders?customer_id=${currentCustomer.id}${currentFolderId ? '&parent_id=' + currentFolderId : ''}`),
-      api("GET", `/api/files?customer_id=${currentCustomer.id}${currentFolderId ? '&folder_id=' + currentFolderId : ''}`),
+    let foldersQuery = sb.from("nageo_files_folders").select("*").eq("customer_id", currentCustomer.id);
+    let filesQuery = sb.from("nageo_files_files").select("*").eq("customer_id", currentCustomer.id);
+    if (currentFolderId) {
+      foldersQuery = foldersQuery.eq("parent_id", currentFolderId);
+      filesQuery = filesQuery.eq("folder_id", currentFolderId);
+    } else {
+      foldersQuery = foldersQuery.is("parent_id", null);
+      filesQuery = filesQuery.is("folder_id", null);
+    }
+    const [foldersRes, filesRes] = await Promise.all([
+      foldersQuery.order("name"),
+      filesQuery.order("name"),
     ]);
-    lastFolders = foldersData || [];
-    lastFiles = filesData || [];
+    if (foldersRes.error) throw foldersRes.error;
+    if (filesRes.error) throw filesRes.error;
+    lastFolders = foldersRes.data || [];
+    lastFiles = filesRes.data || [];
     renderFileView(lastFolders, lastFiles);
   } catch (e) {
     document.getElementById("fileContent").innerHTML = `<div style="padding:2rem;text-align:center;color:var(--red);">❌ Could not load files.<br><small>${e.message}</small></div>`;
@@ -321,8 +313,9 @@ function renderFileView(folders, files) {
       const clickHandler = selectMode
         ? `toggleItemSelect('folder', ${dataAttr})`
         : `openFolder(${dataAttr})`;
+      const dragAttrs = selectMode ? '' : `draggable="true" ondragstart="handleDragStart(event,'folder',${dataAttr})" ondragend="handleDragEnd(event)" ondragover="handleDragOverFolder(event,${dataAttr})" ondragleave="handleDragLeaveCard(event)" ondrop="handleDropOnFolder(event,${dataAttr})"`;
       html += `
-        <div class="folder-card${selected ? ' card-selected' : ''}" onclick="${clickHandler}">
+        <div class="folder-card${selected ? ' card-selected' : ''}" ${dragAttrs} onclick="${clickHandler}">
           ${selectMode ? `<div class="card-checkbox${selected ? ' checked' : ''}"></div>` : ''}
           <div class="card-icon">📁</div>
           <div class="card-name">${esc(f.name)}</div>
@@ -341,8 +334,9 @@ function renderFileView(folders, files) {
       const clickHandler = selectMode
         ? `toggleItemSelect('file', ${dataAttr})`
         : `previewFile(${dataAttr})`;
+      const dragAttrs = selectMode ? '' : `draggable="true" ondragstart="handleDragStart(event,'file',${dataAttr})" ondragend="handleDragEnd(event)"`;
       html += `
-        <div class="file-card${selected ? ' card-selected' : ''}" onclick="${clickHandler}">
+        <div class="file-card${selected ? ' card-selected' : ''}" ${dragAttrs} onclick="${clickHandler}">
           ${selectMode ? `<div class="card-checkbox${selected ? ' checked' : ''}"></div>` : ''}
           <div class="card-icon">${fileIcon(f.name)}</div>
           <div class="card-name">${esc(f.name)}</div>
@@ -388,11 +382,69 @@ function navTo(idx) {
 }
 function renderBreadcrumb() {
   const el = document.getElementById("breadcrumb");
-  let html = `<button class="bc-item${currentFolderId ? '' : ' cur'}" onclick="navTo(-1)">📁 ${esc(currentCustomer?.name || '')}</button>`;
+  let html = `<button class="bc-item${currentFolderId ? '' : ' cur'}" onclick="navTo(-1)" ondragover="handleDragOverCrumb(event)" ondragleave="handleDragLeaveCard(event)" ondrop="handleDropOnCrumb(event,null)">📁 ${esc(currentCustomer?.name || '')}</button>`;
   breadcrumbs.forEach((b, i) => {
-    html += `<span class="bc-sep">›</span><button class="bc-item${i === breadcrumbs.length - 1 && currentFolderId ? ' cur' : ''}" onclick="navTo(${i})">${esc(b.name || 'Folder')}</button>`;
+    const tid = b.id == null ? 'null' : `'${b.id}'`;
+    html += `<span class="bc-sep">›</span><button class="bc-item${i === breadcrumbs.length - 1 && currentFolderId ? ' cur' : ''}" onclick="navTo(${i})" ondragover="handleDragOverCrumb(event)" ondragleave="handleDragLeaveCard(event)" ondrop="handleDropOnCrumb(event,${tid})">${esc(b.name || 'Folder')}</button>`;
   });
   el.innerHTML = html;
+}
+// ── DRAG & DROP MOVE ──
+function handleDragStart(evt, type, data) {
+  if (selectMode) { evt.preventDefault(); return; }
+  dragData = { type, id: data.id, name: data.name };
+  evt.dataTransfer.effectAllowed = "move";
+  evt.dataTransfer.setData("text/plain", String(data.id)); // Firefox requires data to be set to allow the drag
+  evt.currentTarget.classList.add("dragging");
+}
+function handleDragEnd(evt) {
+  evt.currentTarget.classList.remove("dragging");
+  document.querySelectorAll(".drop-target").forEach(el => el.classList.remove("drop-target"));
+  dragData = null;
+}
+function handleDragOverFolder(evt, folderData) {
+  if (!dragData) return;
+  if (dragData.type === "folder" && dragData.id === folderData.id) return; // can't drop a folder into itself
+  evt.preventDefault();
+  evt.dataTransfer.dropEffect = "move";
+  evt.currentTarget.classList.add("drop-target");
+}
+function handleDragLeaveCard(evt) {
+  evt.currentTarget.classList.remove("drop-target");
+}
+async function handleDropOnFolder(evt, folderData) {
+  evt.preventDefault();
+  evt.currentTarget.classList.remove("drop-target");
+  if (!dragData) return;
+  if (dragData.type === "folder" && dragData.id === folderData.id) { dragData = null; return; }
+  const d = dragData; dragData = null;
+  await moveItem(d.type, d.id, folderData.id);
+}
+function handleDragOverCrumb(evt) {
+  if (!dragData) return;
+  evt.preventDefault();
+  evt.dataTransfer.dropEffect = "move";
+  evt.currentTarget.classList.add("drop-target");
+}
+async function handleDropOnCrumb(evt, targetFolderId) {
+  evt.preventDefault();
+  evt.currentTarget.classList.remove("drop-target");
+  if (!dragData) return;
+  const d = dragData; dragData = null;
+  await moveItem(d.type, d.id, targetFolderId);
+}
+async function moveItem(type, id, targetFolderId) {
+  if (targetFolderId === currentFolderId) return; // dropped back where it already is — no-op
+  try {
+    const table = type === "folder" ? "nageo_files_folders" : "nageo_files_files";
+    const col = type === "folder" ? "parent_id" : "folder_id";
+    const { error } = await sb.from(table).update({ [col]: targetFolderId, updated_at: new Date().toISOString() }).eq("id", id);
+    if (error) throw error;
+    toast("✅ Moved", "ok");
+    loadFileView();
+  } catch (e) {
+    toast("❌ Move failed: " + e.message, "err");
+  }
 }
 // ── FOLDERS ──
 async function createFolder() {
@@ -401,7 +453,12 @@ async function createFolder() {
   document.getElementById("createFolderBtn").textContent = "Creating…";
   document.getElementById("createFolderBtn").disabled = true;
   try {
-    await api("POST", "/api/folders", { customer_id: currentCustomer.id, name, parent_id: currentFolderId });
+    const { error } = await sb.from("nageo_files_folders").insert({
+      customer_id: currentCustomer.id,
+      parent_id: currentFolderId,
+      name,
+    });
+    if (error) throw error;
     closeModal("modalNewFolder");
     document.getElementById("newFolderName").value = "";
     toast("📁 Folder created!", "ok");
@@ -414,6 +471,10 @@ async function createFolder() {
   }
 }
 // ── UPLOAD ──
+function randId() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  return "f" + Date.now().toString(36) + Math.random().toString(36).slice(2);
+}
 async function uploadFiles(files) {
   if (!currentCustomer) return;
   const bar = document.getElementById("uploadBar");
@@ -428,23 +489,25 @@ async function uploadFiles(files) {
     fill.style.width = progress + "%";
     pct.textContent = progress + "%";
     try {
-      const params = new URLSearchParams({
+      const dot = file.name.lastIndexOf(".");
+      const ext = dot > -1 ? file.name.slice(dot) : "";
+      const storagePath = `${currentCustomer.id}/${randId()}${ext}`;
+      const { error: upErr } = await sb.storage.from(STORAGE_BUCKET).upload(storagePath, file, {
+        contentType: file.type || "application/octet-stream",
+        upsert: false,
+      });
+      if (upErr) throw upErr;
+      const { error: insErr } = await sb.from("nageo_files_files").insert({
         customer_id: currentCustomer.id,
-        file_name: file.name,
-        file_size: file.size,
-        ...(currentFolderId ? { folder_id: currentFolderId } : {}),
+        folder_id: currentFolderId,
+        name: file.name,
+        size: file.size,
+        mime_type: file.type || "application/octet-stream",
+        storage_path: storagePath,
       });
-      const res = await fetch(`${WORKER_BASE}/api/files/upload?${params}`, {
-        method: "POST",
-        headers: { "X-Registration-Code": regCode, "Content-Type": file.type || "application/octet-stream" },
-        body: file,
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        toast(`❌ Failed to upload ${file.name}: ${err.error || "unknown error"}`, "err");
-      }
+      if (insErr) throw insErr;
     } catch (e) {
-      toast(`❌ Failed to upload ${file.name}`, "err");
+      toast(`❌ Failed to upload ${file.name}: ${e.message}`, "err");
     }
   }
   fill.style.width = "100%";
@@ -468,12 +531,9 @@ async function previewFile(file) {
   document.getElementById("previewContent").innerHTML = `<div style="padding:2rem;text-align:center;color:var(--text3);">Loading preview…</div>`;
   openModal("modalPreview");
   try {
-    const url = `${WORKER_BASE}/api/files/download?id=${file.id}`;
-    const headers = { "X-Registration-Code": regCode };
-    const res = await fetch(url, { headers });
-    if (!res.ok) throw new Error("Could not load file");
-    const blob = await res.blob();
-    const objUrl = URL.createObjectURL(blob);
+    const { data, error } = await sb.storage.from(STORAGE_BUCKET).download(file.storage_path);
+    if (error) throw error;
+    const objUrl = URL.createObjectURL(data);
     if (isImage) {
       document.getElementById("previewContent").innerHTML = `<img class="preview-img" src="${objUrl}" alt="${esc(file.name)}">`;
     } else {
@@ -486,12 +546,9 @@ async function previewFile(file) {
 async function downloadFile(file) {
   toast("⬇️ Downloading…");
   try {
-    const res = await fetch(`${WORKER_BASE}/api/files/download?id=${file.id}`, {
-      headers: { "X-Registration-Code": regCode },
-    });
-    if (!res.ok) throw new Error("Download failed");
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
+    const { data, error } = await sb.storage.from(STORAGE_BUCKET).download(file.storage_path);
+    if (error) throw error;
+    const url = URL.createObjectURL(data);
     const a = document.createElement("a");
     a.href = url;
     a.download = file.name;
@@ -507,11 +564,9 @@ async function doRename() {
   const name = document.getElementById("renameInput").value.trim();
   if (!name) { document.getElementById("renameInput").focus(); return; }
   try {
-    if (renameTarget.type === "folder") {
-      await api("POST", "/api/folders/rename", { id: renameTarget.data.id, name });
-    } else {
-      await api("POST", "/api/files/rename", { id: renameTarget.data.id, name });
-    }
+    const table = renameTarget.type === "folder" ? "nageo_files_folders" : "nageo_files_files";
+    const { error } = await sb.from(table).update({ name, updated_at: new Date().toISOString() }).eq("id", renameTarget.data.id);
+    if (error) throw error;
     closeModal("modalRename");
     toast("✅ Renamed!", "ok");
     loadFileView();
@@ -520,7 +575,36 @@ async function doRename() {
   }
   renameTarget = null;
 }
-// ── DELETE (single, via context menu) ──
+// ── DELETE HELPERS (storage cleanup + DB row, folders recurse) ──
+async function collectStoragePathsRecursive(customerId, folderId) {
+  const { data: files, error: fErr } = await sb.from("nageo_files_files").select("storage_path").eq("customer_id", customerId).eq("folder_id", folderId);
+  if (fErr) throw fErr;
+  let paths = (files || []).map(f => f.storage_path);
+  const { data: subfolders, error: subErr } = await sb.from("nageo_files_folders").select("id").eq("customer_id", customerId).eq("parent_id", folderId);
+  if (subErr) throw subErr;
+  for (const sf of (subfolders || [])) {
+    const nested = await collectStoragePathsRecursive(customerId, sf.id);
+    paths = paths.concat(nested);
+  }
+  return paths;
+}
+async function deleteFolderDeep(folder) {
+  const paths = await collectStoragePathsRecursive(currentCustomer.id, folder.id);
+  if (paths.length) {
+    const { error: rmErr } = await sb.storage.from(STORAGE_BUCKET).remove(paths);
+    if (rmErr) throw rmErr;
+  }
+  // Deleting the folder row cascades to every subfolder + file row underneath it (FK on delete cascade).
+  const { error } = await sb.from("nageo_files_folders").delete().eq("id", folder.id);
+  if (error) throw error;
+}
+async function deleteFileDeep(file) {
+  const { error: rmErr } = await sb.storage.from(STORAGE_BUCKET).remove([file.storage_path]);
+  if (rmErr) throw rmErr;
+  const { error } = await sb.from("nageo_files_files").delete().eq("id", file.id);
+  if (error) throw error;
+}
+// ── DELETE (single, via context menu, or bulk) ──
 async function doDelete() {
   if (!deleteTarget) return;
   document.getElementById("deleteOkBtn").disabled = true;
@@ -531,8 +615,8 @@ async function doDelete() {
       let failed = 0;
       for (const it of items) {
         try {
-          if (it.type === "folder") await api("DELETE", `/api/folders?id=${it.data.id}`);
-          else await api("DELETE", `/api/files/delete?id=${it.data.id}`);
+          if (it.type === "folder") await deleteFolderDeep(it.data);
+          else await deleteFileDeep(it.data);
         } catch (e) {
           failed++;
         }
@@ -543,12 +627,12 @@ async function doDelete() {
       exitSelectMode();
       loadFileView();
     } else if (deleteTarget.type === "folder") {
-      await api("DELETE", `/api/folders?id=${deleteTarget.data.id}`);
+      await deleteFolderDeep(deleteTarget.data);
       closeModal("modalDelete");
       toast("🗑️ Deleted", "ok");
       loadFileView();
     } else {
-      await api("DELETE", `/api/files/delete?id=${deleteTarget.data.id}`);
+      await deleteFileDeep(deleteTarget.data);
       closeModal("modalDelete");
       toast("🗑️ Deleted", "ok");
       loadFileView();
@@ -615,12 +699,12 @@ function confirmBulkDelete() {
 }
 // Recursively collects every file under a folder (for bulk download), preserving relative paths.
 async function collectFilesRecursive(customerId, folderId, pathPrefix) {
-  const [foldersData, filesData] = await Promise.all([
-    api("GET", `/api/folders?customer_id=${customerId}&parent_id=${folderId}`),
-    api("GET", `/api/files?customer_id=${customerId}&folder_id=${folderId}`),
-  ]);
-  let out = (filesData || []).map(f => ({ file: f, path: pathPrefix + f.name }));
-  for (const sub of (foldersData || [])) {
+  const { data: files, error: fErr } = await sb.from("nageo_files_files").select("*").eq("customer_id", customerId).eq("folder_id", folderId);
+  if (fErr) throw fErr;
+  let out = (files || []).map(f => ({ file: f, path: pathPrefix + f.name }));
+  const { data: subfolders, error: subErr } = await sb.from("nageo_files_folders").select("*").eq("customer_id", customerId).eq("parent_id", folderId);
+  if (subErr) throw subErr;
+  for (const sub of (subfolders || [])) {
     const nested = await collectFilesRecursive(customerId, sub.id, pathPrefix + sub.name + "/");
     out = out.concat(nested);
   }
@@ -669,11 +753,8 @@ async function bulkDownloadSelected() {
       fill.style.width = pctVal + "%";
       pct.textContent = pctVal + "%";
       try {
-        const res = await fetch(`${WORKER_BASE}/api/files/download?id=${file.id}`, {
-          headers: { "X-Registration-Code": regCode },
-        });
-        if (!res.ok) continue;
-        const blob = await res.blob();
+        const { data: blob, error } = await sb.storage.from(STORAGE_BUCKET).download(file.storage_path);
+        if (error || !blob) continue;
         zip.file(path, blob);
       } catch (e) {
         // skip files that fail to fetch, continue with the rest
@@ -704,9 +785,16 @@ async function bulkDownloadSelected() {
 // ── GLOBAL SEARCH ──
 async function globalSearch(q) {
   try {
-    const params = currentCustomer ? `?q=${encodeURIComponent(q)}&customer_id=${currentCustomer.id}` : `?q=${encodeURIComponent(q)}`;
-    const data = await api("GET", `/api/search${params}`);
-    showSearchResults(q, data.files || [], data.folders || []);
+    let folderQuery = sb.from("nageo_files_folders").select("*").ilike("name", `%${q}%`).limit(5);
+    let fileQuery = sb.from("nageo_files_files").select("*").ilike("name", `%${q}%`).limit(8);
+    if (currentCustomer) {
+      folderQuery = folderQuery.eq("customer_id", currentCustomer.id);
+      fileQuery = fileQuery.eq("customer_id", currentCustomer.id);
+    }
+    const [fRes, flRes] = await Promise.all([folderQuery, fileQuery]);
+    if (fRes.error) throw fRes.error;
+    if (flRes.error) throw flRes.error;
+    showSearchResults(q, flRes.data || [], fRes.data || []);
   } catch (e) {
     hideSearchResults();
   }
@@ -729,7 +817,7 @@ function showSearchResults(q, files, folders) {
   files.slice(0, 8).forEach(f => {
     html += `<div class="sr-item" onclick="jumpToFile('${f.customer_id}','${f.folder_id || ''}','${f.id}')">
       <div class="sr-icon">${fileIcon(f.name)}</div>
-      <div class="sr-info"><div class="sr-name">${esc(f.name)}</div><div class="sr-sub">${formatSize(f.size)} · ${f.customer_id}</div></div>
+      <div class="sr-info"><div class="sr-name">${esc(f.name)}</div><div class="sr-sub">${formatSize(f.size)} · ${esc(customerTagFor(f.customer_id))}</div></div>
       <div class="sr-badge badge-file">File</div>
     </div>`;
   });
@@ -762,8 +850,11 @@ async function jumpToFile(customerId, folderId, fileId) {
   currentFolderId = folderId || null;
   // Load and preview
   try {
-    const files = await api("GET", `/api/files?customer_id=${customerId}${folderId ? '&folder_id=' + folderId : ''}`);
-    const file = (files || []).find(f => f.id === fileId);
+    let q = sb.from("nageo_files_files").select("*").eq("customer_id", customerId);
+    q = folderId ? q.eq("folder_id", folderId) : q.is("folder_id", null);
+    const { data, error } = await q;
+    if (error) throw error;
+    const file = (data || []).find(f => f.id === fileId);
     if (file) previewFile(file);
   } catch (e) {}
 }
