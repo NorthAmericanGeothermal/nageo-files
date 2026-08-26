@@ -6,13 +6,19 @@ const HCP_CUSTOMERS_URL = SUPABASE_URL + "/functions/v1/nageo-files-hcp-customer
 const SEARCH_EMAILS_URL = SUPABASE_URL + "/functions/v1/nageo-files-search-emails";
 const STORAGE_BUCKET = "nageo-files-documents";
 const REG_KEY = "nageo_files_reg";
+// Name of the protected, auto-created folder each customer gets the first
+// time a saved search email needs somewhere to live. Locked — the app
+// blocks renaming/deleting/moving it or its contents, and blocks manual
+// uploads/new-folders inside it. See getOrCreateEmailsFolder / saveEmailsToFolder.
+const EMAILS_FOLDER_NAME = "📧 Emails";
 // ── STATE ──
 let regCode = localStorage.getItem(REG_KEY) || "";
 let allCustomers = [];
 let filteredCustomers = [];
 let currentCustomer = null;
 let currentFolderId = null;
-let breadcrumbs = []; // [{id, name}]
+let currentFolderIsSystem = false; // true while viewing inside the locked Emails folder
+let breadcrumbs = []; // [{id, name, isSystem}]
 let ctxTarget = null; // {type:'folder'|'file', data}
 let renameTarget = null;
 let deleteTarget = null;
@@ -243,6 +249,7 @@ function selectCustomer(id) {
   if (!c) return;
   currentCustomer = c;
   currentFolderId = null;
+  currentFolderIsSystem = false;
   breadcrumbs = [];
   exitSelectMode();
   renderCustomerList(filteredCustomers); // refresh active state
@@ -257,6 +264,7 @@ function selectCustomer(id) {
 // ── FILE BROWSER ──
 async function loadFileView() {
   renderBreadcrumb();
+  updateSystemFolderUI();
   selectedItems.clear();
   updateSelectBar();
   document.getElementById("fileContent").innerHTML = `
@@ -317,16 +325,20 @@ function renderFileView(folders, files) {
       const key = "folder:" + f.id;
       const selected = selectedItems.has(key);
       const dataAttr = JSON.stringify(f).replace(/"/g,'&quot;');
-      const clickHandler = selectMode
+      const isSys = !!f.is_system;
+      const clickHandler = (selectMode && !isSys)
         ? `toggleItemSelect('folder', ${dataAttr})`
         : `openFolder(${dataAttr})`;
-      const dragAttrs = selectMode ? '' : `draggable="true" ondragstart="handleDragStart(event,'folder',${dataAttr})" ondragend="handleDragEnd(event)" ondragover="handleDragOverFolder(event,${dataAttr})" ondragleave="handleDragLeaveCard(event)" ondrop="handleDropOnFolder(event,${dataAttr})"`;
+      // System folder: not draggable, and not a drop target either — omitting
+      // the drag/drop attrs entirely means the browser just refuses drops on
+      // it by default, which is exactly the "can't be modified" behavior we want.
+      const dragAttrs = (selectMode || isSys) ? '' : `draggable="true" ondragstart="handleDragStart(event,'folder',${dataAttr})" ondragend="handleDragEnd(event)" ondragover="handleDragOverFolder(event,${dataAttr})" ondragleave="handleDragLeaveCard(event)" ondrop="handleDropOnFolder(event,${dataAttr})"`;
       html += `
-        <div class="folder-card${selected ? ' card-selected' : ''}" ${dragAttrs} onclick="${clickHandler}">
-          ${selectMode ? `<div class="card-checkbox${selected ? ' checked' : ''}"></div>` : ''}
+        <div class="folder-card${selected ? ' card-selected' : ''}${isSys ? ' folder-card-system' : ''}" ${dragAttrs} onclick="${clickHandler}">
+          ${(selectMode && !isSys) ? `<div class="card-checkbox${selected ? ' checked' : ''}"></div>` : ''}
           <div class="card-icon">📁</div>
           <div class="card-name">${esc(f.name)}</div>
-          ${selectMode ? '' : `<button class="card-menu" onclick="event.stopPropagation();showCtx(event,'folder',${dataAttr})">⋯</button>`}
+          ${isSys ? `<span class="card-system-badge" title="Auto-synced from Search Emails — protected, can't be renamed, moved, or deleted">🔒</span>` : (selectMode ? '' : `<button class="card-menu" onclick="event.stopPropagation();showCtx(event,'folder',${dataAttr})">⋯</button>`)}
         </div>
       `;
     });
@@ -338,13 +350,14 @@ function renderFileView(folders, files) {
       const key = "file:" + f.id;
       const selected = selectedItems.has(key);
       const dataAttr = JSON.stringify(f).replace(/"/g,'&quot;');
-      const clickHandler = selectMode
+      const isSys = currentFolderIsSystem; // files inside the locked Emails folder are protected too
+      const clickHandler = (selectMode && !isSys)
         ? `toggleItemSelect('file', ${dataAttr})`
         : `previewFile(${dataAttr})`;
-      const dragAttrs = selectMode ? '' : `draggable="true" ondragstart="handleDragStart(event,'file',${dataAttr})" ondragend="handleDragEnd(event)"`;
+      const dragAttrs = (selectMode || isSys) ? '' : `draggable="true" ondragstart="handleDragStart(event,'file',${dataAttr})" ondragend="handleDragEnd(event)"`;
       html += `
-        <div class="file-card${selected ? ' card-selected' : ''}" ${dragAttrs} onclick="${clickHandler}">
-          ${selectMode ? `<div class="card-checkbox${selected ? ' checked' : ''}"></div>` : ''}
+        <div class="file-card${selected ? ' card-selected' : ''}${isSys ? ' folder-card-system' : ''}" ${dragAttrs} onclick="${clickHandler}">
+          ${(selectMode && !isSys) ? `<div class="card-checkbox${selected ? ' checked' : ''}"></div>` : ''}
           <div class="card-icon">${fileIcon(f.name)}</div>
           <div class="card-name">${esc(f.name)}</div>
           <div class="card-meta">${formatSize(f.size)}</div>
@@ -361,28 +374,41 @@ function rewireDrop() {
   const fc = document.getElementById("fileContent");
   const ov = document.getElementById("dropOverlay");
   if (!ov) return;
-  fc.addEventListener("dragover", e => { e.preventDefault(); ov.classList.add("active"); });
+  fc.addEventListener("dragover", e => { e.preventDefault(); if (!currentFolderIsSystem) ov.classList.add("active"); });
   fc.addEventListener("dragleave", e => { if (!fc.contains(e.relatedTarget)) ov.classList.remove("active"); });
   fc.addEventListener("drop", e => {
     e.preventDefault(); ov.classList.remove("active");
+    if (currentFolderIsSystem) { toast("🔒 Files can't be added to the Emails folder by hand — it's filled automatically by Search Emails.", "err"); return; }
     const files = Array.from(e.dataTransfer.files);
     if (files.length) uploadFiles(files);
   });
 }
+// Hides New Folder / Upload / Take Photo while inside the locked Emails
+// folder — that folder is only ever fed by saveEmailsToFolder().
+function updateSystemFolderUI() {
+  const hide = currentFolderIsSystem;
+  ["newFolderBtn", "uploadBtn", "cameraBtn"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = hide ? "none" : "";
+  });
+}
 // ── NAVIGATION ──
 function openFolder(folder) {
-  breadcrumbs.push({ id: currentFolderId, name: currentFolderId ? breadcrumbs[breadcrumbs.length-1]?.name : currentCustomer.name });
+  breadcrumbs.push({ id: currentFolderId, name: currentFolderId ? breadcrumbs[breadcrumbs.length-1]?.name : currentCustomer.name, isSystem: currentFolderIsSystem });
   currentFolderId = folder.id;
+  currentFolderIsSystem = !!folder.is_system;
   loadFileView();
 }
 function navTo(idx) {
   // idx = -1 means root, 0..n means breadcrumb index
   if (idx < 0) {
     currentFolderId = null;
+    currentFolderIsSystem = false;
     breadcrumbs = [];
   } else {
     const item = breadcrumbs[idx];
     currentFolderId = item.id;
+    currentFolderIsSystem = !!item.isSystem;
     breadcrumbs = breadcrumbs.slice(0, idx);
   }
   loadFileView();
@@ -399,6 +425,8 @@ function renderBreadcrumb() {
 // ── DRAG & DROP MOVE ──
 function handleDragStart(evt, type, data) {
   if (selectMode) { evt.preventDefault(); return; }
+  if (type === "folder" && data.is_system) { evt.preventDefault(); return; } // the Emails folder can't be dragged
+  if (type === "file" && data.gmail_message_id) { evt.preventDefault(); return; } // saved emails can't be moved
   dragData = { type, id: data.id, name: data.name };
   evt.dataTransfer.effectAllowed = "move";
   evt.dataTransfer.setData("text/plain", String(data.id)); // Firefox requires data to be set to allow the drag
@@ -412,6 +440,7 @@ function handleDragEnd(evt) {
 function handleDragOverFolder(evt, folderData) {
   if (!dragData) return;
   if (dragData.type === "folder" && dragData.id === folderData.id) return; // can't drop a folder into itself
+  if (folderData.is_system) return; // can't drop anything into the locked Emails folder
   evt.preventDefault();
   evt.dataTransfer.dropEffect = "move";
   evt.currentTarget.classList.add("drop-target");
@@ -424,6 +453,7 @@ async function handleDropOnFolder(evt, folderData) {
   evt.currentTarget.classList.remove("drop-target");
   if (!dragData) return;
   if (dragData.type === "folder" && dragData.id === folderData.id) { dragData = null; return; }
+  if (folderData.is_system) { dragData = null; toast("🔒 Can't move items into the protected Emails folder.", "err"); return; }
   const d = dragData; dragData = null;
   await moveItem(d.type, d.id, folderData.id);
 }
@@ -443,6 +473,24 @@ async function handleDropOnCrumb(evt, targetFolderId) {
 async function moveItem(type, id, targetFolderId) {
   if (targetFolderId === currentFolderId) return; // dropped back where it already is — no-op
   try {
+    // Live-checked guards — the authoritative source of truth for the Emails
+    // folder's protection, independent of whatever the drag UI already
+    // blocked client-side (belt and suspenders: the UI checks are just for
+    // a snappier "no" without a round trip).
+    if (targetFolderId) {
+      const { data: tgt, error: tgtErr } = await sb.from("nageo_files_folders").select("is_system").eq("id", targetFolderId).single();
+      if (tgtErr) throw tgtErr;
+      if (tgt && tgt.is_system) { toast("🔒 Can't move items into the protected Emails folder.", "err"); return; }
+    }
+    if (type === "folder") {
+      const { data: srcF, error: srcErr } = await sb.from("nageo_files_folders").select("is_system").eq("id", id).single();
+      if (srcErr) throw srcErr;
+      if (srcF && srcF.is_system) { toast("🔒 The Emails folder can't be moved.", "err"); return; }
+    } else {
+      const { data: srcFile, error: srcErr } = await sb.from("nageo_files_files").select("gmail_message_id").eq("id", id).single();
+      if (srcErr) throw srcErr;
+      if (srcFile && srcFile.gmail_message_id) { toast("🔒 Saved emails can't be moved.", "err"); return; }
+    }
     const table = type === "folder" ? "nageo_files_folders" : "nageo_files_files";
     const col = type === "folder" ? "parent_id" : "folder_id";
     const { error } = await sb.from(table).update({ [col]: targetFolderId, updated_at: new Date().toISOString() }).eq("id", id);
@@ -457,6 +505,7 @@ async function moveItem(type, id, targetFolderId) {
 async function createFolder() {
   const name = document.getElementById("newFolderName").value.trim();
   if (!name) { document.getElementById("newFolderName").focus(); return; }
+  if (currentFolderIsSystem) { toast("🔒 Can't create folders inside the protected Emails folder.", "err"); closeModal("modalNewFolder"); return; }
   document.getElementById("createFolderBtn").textContent = "Creating…";
   document.getElementById("createFolderBtn").disabled = true;
   try {
@@ -484,6 +533,7 @@ function randId() {
 }
 async function uploadFiles(files) {
   if (!currentCustomer) return;
+  if (currentFolderIsSystem) { toast("🔒 Files can't be added to the Emails folder by hand — it's filled automatically by Search Emails.", "err"); return; }
   const bar = document.getElementById("uploadBar");
   const fill = document.getElementById("uploadFill");
   const pct = document.getElementById("uploadPct");
@@ -529,7 +579,8 @@ async function previewFile(file) {
   const mime = file.mime_type || "";
   const isImage = mime.startsWith("image/");
   const isPDF = mime === "application/pdf";
-  if (!isImage && !isPDF) {
+  const isHtml = mime === "text/html"; // saved-email archives from the Emails folder
+  if (!isImage && !isPDF && !isHtml) {
     // Not previewable — download instead
     downloadFile(file);
     return;
@@ -540,11 +591,19 @@ async function previewFile(file) {
   try {
     const { data, error } = await sb.storage.from(STORAGE_BUCKET).download(file.storage_path);
     if (error) throw error;
-    const objUrl = URL.createObjectURL(data);
     if (isImage) {
+      const objUrl = URL.createObjectURL(data);
       document.getElementById("previewContent").innerHTML = `<img class="preview-img" src="${objUrl}" alt="${esc(file.name)}">`;
-    } else {
+    } else if (isPDF) {
+      const objUrl = URL.createObjectURL(data);
       document.getElementById("previewContent").innerHTML = `<iframe class="preview-pdf" src="${objUrl}"></iframe>`;
+    } else {
+      // HTML email archive — render via sandboxed srcdoc, same safe pattern
+      // used for the live email search results, so nothing in a saved
+      // email's markup/script can touch the rest of the page.
+      const text = await data.text();
+      document.getElementById("previewContent").innerHTML = `<iframe class="preview-pdf" id="previewHtmlFrame" sandbox="allow-popups allow-same-origin" title="${esc(file.name)}"></iframe>`;
+      document.getElementById("previewHtmlFrame").srcdoc = text;
     }
   } catch (e) {
     document.getElementById("previewContent").innerHTML = `<div style="padding:2rem;text-align:center;color:var(--red);">❌ Could not load preview.<br><small>${e.message}</small></div>`;
@@ -568,6 +627,12 @@ async function downloadFile(file) {
 // ── RENAME ──
 async function doRename() {
   if (!renameTarget) return;
+  if (renameTarget.type === "folder" && renameTarget.data.is_system) {
+    toast("🔒 The Emails folder can't be renamed.", "err"); closeModal("modalRename"); renameTarget = null; return;
+  }
+  if (renameTarget.type === "file" && (renameTarget.data.gmail_message_id || currentFolderIsSystem)) {
+    toast("🔒 Saved emails can't be renamed.", "err"); closeModal("modalRename"); renameTarget = null; return;
+  }
   const name = document.getElementById("renameInput").value.trim();
   if (!name) { document.getElementById("renameInput").focus(); return; }
   try {
@@ -596,6 +661,7 @@ async function collectStoragePathsRecursive(customerId, folderId) {
   return paths;
 }
 async function deleteFolderDeep(folder) {
+  if (folder.is_system) throw new Error("The Emails folder is protected and can't be deleted.");
   const paths = await collectStoragePathsRecursive(currentCustomer.id, folder.id);
   if (paths.length) {
     const { error: rmErr } = await sb.storage.from(STORAGE_BUCKET).remove(paths);
@@ -606,6 +672,7 @@ async function deleteFolderDeep(folder) {
   if (error) throw error;
 }
 async function deleteFileDeep(file) {
+  if (file.gmail_message_id) throw new Error("Saved emails are protected copies and can't be deleted.");
   const { error: rmErr } = await sb.storage.from(STORAGE_BUCKET).remove([file.storage_path]);
   if (rmErr) throw rmErr;
   const { error } = await sb.from("nageo_files_files").delete().eq("id", file.id);
@@ -878,6 +945,104 @@ var searchEmailsList = []; // [{email, source:'hcp'|'manual'}]
 var emailSearchCancelled = false;
 var emailSearchRunning = false;
 
+// ── PROTECTED "📧 Emails" FOLDER ──────────────────────────────────────────
+// A locked, auto-created folder every customer gets the first time a
+// message found by Search Emails needs somewhere to live. Nothing else ever
+// writes into it — see the is_system / gmail_message_id guards throughout
+// this file (moveItem, doRename, deleteFolderDeep, deleteFileDeep, showCtx,
+// renderFileView, rewireDrop, createFolder, uploadFiles, handleDragStart).
+async function getOrCreateEmailsFolder(customerId) {
+  const { data: existing, error: findErr } = await sb.from("nageo_files_folders")
+    .select("*").eq("customer_id", customerId).is("parent_id", null).eq("is_system", true).limit(1);
+  if (findErr) throw findErr;
+  if (existing && existing.length) return existing[0];
+  const { data, error } = await sb.from("nageo_files_folders")
+    .insert({ customer_id: customerId, parent_id: null, name: EMAILS_FOLDER_NAME, is_system: true })
+    .select().single();
+  if (error) throw error;
+  return data;
+}
+function sanitizeEmailFileName(r) {
+  var base = (r.subject && r.subject.trim()) ? r.subject.trim() : "(no subject)";
+  base = base.replace(/[\\/:*?"<>|]/g, "-").slice(0, 80).trim() || "email";
+  var dateStr = "";
+  if (r.date) {
+    var d = new Date(r.date);
+    if (!isNaN(d.getTime())) dateStr = d.toISOString().slice(0, 10) + " ";
+  }
+  return dateStr + base + ".html";
+}
+function buildEmailArchiveHtml(r) {
+  var bodyContent = (r.html && r.html.trim()) ? r.html : (r.text ? esc(r.text).replace(/\n/g, "<br>") : (r.snippet || ""));
+  var headerHtml = '<div style="font-family:-apple-system,sans-serif;font-size:13px;color:#333;background:#f4f4f6;border-bottom:1px solid #ddd;padding:12px 16px;">'
+    + '<div><strong>From:</strong> ' + esc(r.from || '—') + '</div>'
+    + '<div><strong>To:</strong> ' + esc(r.to || '—') + '</div>'
+    + '<div><strong>Date:</strong> ' + esc(r.date ? new Date(r.date).toLocaleString() : '—') + '</div>'
+    + '<div><strong>Subject:</strong> ' + esc(r.subject || '(no subject)') + '</div>'
+    + '</div>';
+  return '<!DOCTYPE html><html><head><meta charset="utf-8">'
+    + '<style>*{box-sizing:border-box;}body{margin:0;font-family:-apple-system,sans-serif;background:#fff;}.email-body{padding:16px;font-size:13px;line-height:1.55;color:#1a1a1a;word-wrap:break-word;overflow-wrap:break-word;}img{max-width:100%;height:auto;}a{color:#2e73d4;}table{max-width:100%;}</style>'
+    + '</head><body>' + headerHtml + '<div class="email-body">' + bodyContent + '</div></body></html>';
+}
+// Saves every not-yet-saved message in `results` into customerId's locked
+// Emails folder, de-duped against gmail_message_id (both against what's
+// already in the DB and within this batch), and returns how many were newly
+// saved. Safe to call repeatedly with overlapping/duplicate result sets —
+// that's the whole point, since a re-run of Search Emails will re-find
+// messages already archived from a previous search.
+async function saveEmailsToFolder(customerId, results) {
+  if (!results || !results.length) return 0;
+  const folder = await getOrCreateEmailsFolder(customerId);
+  const ids = results.map(function (r) { return r.gmail_message_id; }).filter(Boolean);
+  let already = new Set();
+  if (ids.length) {
+    const { data: existingRows, error: existErr } = await sb.from("nageo_files_files")
+      .select("gmail_message_id").eq("customer_id", customerId).in("gmail_message_id", ids);
+    if (existErr) throw existErr;
+    (existingRows || []).forEach(function (row) { already.add(row.gmail_message_id); });
+  }
+  let savedCount = 0;
+  for (const r of results) {
+    if (!r.gmail_message_id || already.has(r.gmail_message_id)) continue;
+    try {
+      const archiveHtml = buildEmailArchiveHtml(r);
+      const bytes = new TextEncoder().encode(archiveHtml);
+      const storagePath = `${customerId}/${randId()}.html`;
+      const { error: upErr } = await sb.storage.from(STORAGE_BUCKET).upload(storagePath, bytes, {
+        contentType: "text/html", upsert: false,
+      });
+      if (upErr) throw upErr;
+      const { error: insErr } = await sb.from("nageo_files_files").insert({
+        customer_id: customerId,
+        folder_id: folder.id,
+        name: sanitizeEmailFileName(r),
+        size: bytes.length,
+        mime_type: "text/html",
+        storage_path: storagePath,
+        gmail_message_id: r.gmail_message_id,
+        gmail_account: r.account || null,
+      });
+      if (insErr) {
+        // 23505 = unique violation on (customer_id, gmail_message_id) — a
+        // concurrent search already saved this exact message a moment ago.
+        // Clean up the storage object we just uploaded and move on quietly.
+        await sb.storage.from(STORAGE_BUCKET).remove([storagePath]);
+        if (insErr.code !== "23505") throw insErr;
+        already.add(r.gmail_message_id);
+        continue;
+      }
+      already.add(r.gmail_message_id);
+      savedCount++;
+    } catch (e) {
+      console.warn("Failed to save email to Emails folder:", r.subject, e);
+    }
+  }
+  if (savedCount && currentCustomer && currentCustomer.id === customerId && currentFolderId === folder.id) {
+    loadFileView(); // live-refresh if the user happens to already be looking at the Emails folder
+  }
+  return savedCount;
+}
+
 async function openSearchEmailsModal() {
   if (!currentCustomer) return;
   searchEmailsCustomerId = currentCustomer.id;
@@ -1006,6 +1171,18 @@ async function startEmailSearch() {
     progressBox.style.display = "none";
     goBtn.disabled = false;
     emailSearchRunning = false;
+    // Auto-save whatever was found — even a partial batch, if the search was
+    // stopped early or hit the pass cap — into the customer's locked Emails
+    // folder. saveEmailsToFolder de-dupes against what's already saved, so
+    // this is safe to run after every search, complete or not.
+    if (allResults.length) {
+      try {
+        const saved = await saveEmailsToFolder(searchEmailsCustomerId, allResults);
+        if (saved > 0) toast(`📧 ${saved} new email${saved === 1 ? '' : 's'} saved to the Emails folder.`, "ok");
+      } catch (e) {
+        toast("⚠️ Search finished but saving to the Emails folder failed: " + e.message, "err");
+      }
+    }
   }
   if (!allResults.length && !stoppedReason) {
     document.getElementById("searchEmailsResults").innerHTML = '<div class="se-empty">No emails found for any address on this list, across ' + accountsSearched + ' connected account' + (accountsSearched === 1 ? '' : 's') + '.</div>';
@@ -1068,10 +1245,13 @@ function showCtx(event, type, data) {
   event.stopPropagation();
   ctxTarget = { type, data };
   const menu = document.getElementById("ctxMenu");
+  const isProtected = (type === "folder" && data.is_system) || (type === "file" && (data.gmail_message_id || currentFolderIsSystem));
   // Show/hide relevant items
   document.getElementById("ctxOpen").style.display = type === "folder" ? "flex" : "none";
   document.getElementById("ctxPreview").style.display = type === "file" ? "flex" : "none";
   document.getElementById("ctxDownload").style.display = type === "file" ? "flex" : "none";
+  document.getElementById("ctxRename").style.display = isProtected ? "none" : "flex";
+  document.getElementById("ctxDelete").style.display = isProtected ? "none" : "flex";
   // Position menu
   const x = Math.min(event.clientX, window.innerWidth - 180);
   const y = Math.min(event.clientY, window.innerHeight - 200);
