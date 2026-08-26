@@ -6,6 +6,11 @@ const HCP_CUSTOMERS_URL = SUPABASE_URL + "/functions/v1/nageo-files-hcp-customer
 const SEARCH_EMAILS_URL = SUPABASE_URL + "/functions/v1/nageo-files-search-emails";
 const STORAGE_BUCKET = "nageo-files-documents";
 const REG_KEY = "nageo_files_reg";
+// Same shared Gmail OAuth app + redirect used by NAGeo GRECs' "Connect Gmail"
+// button — connecting here adds to the exact same gmail_accounts pool, so an
+// account connected from Files shows up in GRECs/Leads too, and vice versa.
+const GOOGLE_CLIENT_ID = "924555050056-jp3k8vpo89tb14vfghjqefrb1aaik21e.apps.googleusercontent.com";
+const GOOGLE_OAUTH_REDIRECT_URI = SUPABASE_URL + "/functions/v1/lead-gmail-oauth";
 // Name of the protected, auto-created folder each customer gets the first
 // time a saved search email needs somewhere to live. Locked — the app
 // blocks renaming/deleting/moving it or its contents, and blocks manual
@@ -48,6 +53,13 @@ function wireEvents() {
     let v = this.value.replace(/[^A-Za-z0-9-]/g, "").toUpperCase();
     this.value = v;
   });
+  // Global settings (Gmail accounts + Sync All Customers) — available from
+  // anywhere in the app, not tied to any particular customer.
+  document.getElementById("globalSettingsBtn").addEventListener("click", openGlobalSettingsModal);
+  document.getElementById("connectGmailBtn").addEventListener("click", connectGmailAccount);
+  document.getElementById("refreshGmailPoolBtn").addEventListener("click", loadGmailPool);
+  document.getElementById("sweepAllBtn").addEventListener("click", startSweepAllCustomers);
+  document.getElementById("sweepStopBtn").addEventListener("click", function () { sweepCancelled = true; });
   // Sign out
   document.getElementById("signOutBtn").addEventListener("click", () => {
     if (confirm("This will sign out this device. You'll need the registration code again.")) {
@@ -1041,6 +1053,201 @@ async function saveEmailsToFolder(customerId, results) {
     loadFileView(); // live-refresh if the user happens to already be looking at the Emails folder
   }
   return savedCount;
+}
+
+// ── GLOBAL SETTINGS: GMAIL ACCOUNT POOL + SYNC ALL CUSTOMERS ──────────────
+// Available from the ⚙ Settings button in the top bar — not tied to any one
+// customer. Lists every connected Gmail account in the shared pool, lets you
+// connect more (real Google OAuth, same flow/pool GRECs and Leads use), and
+// runs a full sweep that searches every customer's email address(es) and
+// auto-saves anything found into that customer's locked Emails folder.
+var gmailPool = [];
+var sweepCancelled = false;
+var sweepRunning = false;
+// Kept lower than the per-customer 🔍 Search Emails button's 25-pass cap —
+// this sweep walks EVERY customer, so each one needs to stay quick.
+// Customers with a lot of mail can always be fully searched individually
+// afterward via their own Search Emails button, which will pick up right
+// where the sweep left off (same cursor-based pagination, nothing lost).
+var SWEEP_MAX_PASSES_PER_CUSTOMER = 6;
+
+function openGlobalSettingsModal() {
+  document.getElementById("sweepProgress").style.display = "none";
+  document.getElementById("sweepSummary").style.display = "none";
+  document.getElementById("sweepLog").style.display = "none";
+  document.getElementById("sweepLog").innerHTML = "";
+  loadGmailPool();
+  openModal("modalGlobalSettings");
+}
+async function loadGmailPool() {
+  var el = document.getElementById("gmailAccountsList");
+  el.innerHTML = '<div class="se-empty" style="padding:.5rem 0;">Loading…</div>';
+  try {
+    const res = await fetch(SEARCH_EMAILS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + SUPABASE_KEY, "apikey": SUPABASE_KEY },
+      body: JSON.stringify({ action: "list_pool" }),
+    });
+    const data = await res.json();
+    gmailPool = (data && data.accounts) || [];
+  } catch (e) {
+    gmailPool = [];
+  }
+  renderGmailPool();
+}
+function renderGmailPool() {
+  var el = document.getElementById("gmailAccountsList");
+  if (!gmailPool.length) {
+    el.innerHTML = '<div class="se-empty" style="padding:.5rem 0;">No Gmail accounts connected yet — connect one below.</div>';
+    return;
+  }
+  el.innerHTML = gmailPool.map(function (a) {
+    var statusClass = a.status === "connected" ? "connected" : "error";
+    return '<div class="gmail-acct-row">'
+      + '<span class="gmail-acct-email">' + esc(a.google_email) + '</span>'
+      + '<span class="gmail-acct-status ' + statusClass + '">' + esc(a.status) + '</span>'
+      + '</div>';
+  }).join("");
+}
+function connectGmailAccount() {
+  var params = new URLSearchParams({
+    client_id: GOOGLE_CLIENT_ID,
+    redirect_uri: GOOGLE_OAUTH_REDIRECT_URI,
+    response_type: "code",
+    access_type: "offline",
+    prompt: "consent",
+    // Same scope set GRECs' connect flow requests, so an account connected
+    // from either tool ends up with identical permissions in the shared pool.
+    scope: "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.metadata https://www.googleapis.com/auth/gmail.send",
+    state: "",
+  });
+  window.open("https://accounts.google.com/o/oauth2/v2/auth?" + params.toString(), "_blank");
+  toast("Complete the Google sign-in in the new tab, then come back and click Refresh List.", "ok");
+}
+
+// Multi-pass search for ONE customer during a sweep — a lighter-weight
+// sibling of startEmailSearch's loop (no UI rendering per pass, and a lower
+// pass cap), since the sweep needs to keep moving through hundreds of
+// customers rather than exhaustively paginate any single one.
+async function sweepSearchOneCustomer(emails, maxPasses) {
+  var allResults = [];
+  var seen = {};
+  var cursors = {};
+  var pass = 0;
+  while (pass < maxPasses) {
+    pass++;
+    var data;
+    try {
+      const res = await fetch(SEARCH_EMAILS_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + SUPABASE_KEY, "apikey": SUPABASE_KEY },
+        body: JSON.stringify({ emails: emails, cursors: cursors }),
+      });
+      data = await res.json();
+    } catch (e) {
+      break; // network hiccup on this one customer — move on, don't kill the whole sweep
+    }
+    if (data.error) break;
+    (data.results || []).forEach(function (r) {
+      var key = r.account + ":" + r.gmail_message_id;
+      if (seen[key]) return;
+      seen[key] = true;
+      allResults.push(r);
+    });
+    cursors = data.cursors || {};
+    if (data.note) break;
+    if (sweepCancelled) break;
+    if (!data.has_more) break;
+  }
+  return allResults;
+}
+async function startSweepAllCustomers() {
+  if (sweepRunning) return;
+  if (!allCustomers.length) { toast("Customer list hasn't loaded yet — try again in a moment.", "err"); return; }
+  sweepRunning = true;
+  sweepCancelled = false;
+  var btn = document.getElementById("sweepAllBtn");
+  var progressBox = document.getElementById("sweepProgress");
+  var progressText = document.getElementById("sweepProgressText");
+  var stopBtn = document.getElementById("sweepStopBtn");
+  var summaryEl = document.getElementById("sweepSummary");
+  var logEl = document.getElementById("sweepLog");
+  btn.disabled = true;
+  stopBtn.disabled = false;
+  stopBtn.textContent = "Stop after this customer";
+  progressBox.style.display = "block";
+  summaryEl.style.display = "block";
+  logEl.style.display = "block";
+  logEl.innerHTML = "";
+  progressText.textContent = "Loading manually-added email addresses…";
+
+  var manualByCustomer = {};
+  try {
+    const { data, error } = await sb.from("nageo_files_manual_emails").select("customer_id, email");
+    if (!error && data) {
+      data.forEach(function (row) {
+        if (!manualByCustomer[row.customer_id]) manualByCustomer[row.customer_id] = [];
+        manualByCustomer[row.customer_id].push(row.email);
+      });
+    }
+  } catch (e) { /* proceed with HCP-on-file emails only */ }
+
+  var skipped = 0, totalSaved = 0, totalFound = 0, failed = 0;
+  var customers = allCustomers.slice();
+
+  for (var i = 0; i < customers.length; i++) {
+    if (sweepCancelled) break;
+    var c = customers[i];
+    var emails = [];
+    if (c.email && c.email.trim()) emails.push(c.email.trim().toLowerCase());
+    (manualByCustomer[c.id] || []).forEach(function (e) {
+      var v = (e || "").trim().toLowerCase();
+      if (v && emails.indexOf(v) === -1) emails.push(v);
+    });
+    progressText.textContent = "Customer " + (i + 1) + " of " + customers.length + ": " + c.name;
+    if (!emails.length) {
+      skipped++;
+      appendSweepLogRow(c.name, "no email on file", false);
+      updateSweepSummary(summaryEl, i + 1, customers.length, skipped, totalSaved, totalFound, failed);
+      continue;
+    }
+    try {
+      const results = await sweepSearchOneCustomer(emails, SWEEP_MAX_PASSES_PER_CUSTOMER);
+      totalFound += results.length;
+      var saved = results.length ? await saveEmailsToFolder(c.id, results) : 0;
+      totalSaved += saved;
+      appendSweepLogRow(c.name, results.length ? (saved + " new · " + results.length + " found") : "no emails found", saved > 0);
+    } catch (e) {
+      failed++;
+      appendSweepLogRow(c.name, "error: " + e.message, false);
+    }
+    updateSweepSummary(summaryEl, i + 1, customers.length, skipped, totalSaved, totalFound, failed);
+  }
+
+  progressBox.style.display = "none";
+  btn.disabled = false;
+  sweepRunning = false;
+  var finishedAll = !sweepCancelled;
+  updateSweepSummary(summaryEl, Math.min(i, customers.length), customers.length, skipped, totalSaved, totalFound, failed, finishedAll);
+  toast(finishedAll
+    ? ("✅ Sync complete — " + totalSaved + " new email" + (totalSaved === 1 ? "" : "s") + " saved across " + customers.length + " customers.")
+    : ("⏸ Sync stopped — " + totalSaved + " new email" + (totalSaved === 1 ? "" : "s") + " saved so far."), "ok");
+}
+function appendSweepLogRow(name, resultText, hasNew) {
+  var logEl = document.getElementById("sweepLog");
+  var row = document.createElement("div");
+  row.className = "sweep-log-row" + (hasNew ? " has-new" : "");
+  row.innerHTML = '<span class="sweep-log-name">' + esc(name) + '</span><span class="sweep-log-result">' + esc(resultText) + '</span>';
+  logEl.appendChild(row);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function updateSweepSummary(el, done, total, skipped, totalSaved, totalFound, failed, finished) {
+  el.innerHTML = '<b>' + done + ' of ' + total + '</b> customers checked'
+    + (skipped ? ' · ' + skipped + ' skipped (no email on file)' : '')
+    + (failed ? ' · ' + failed + ' failed' : '')
+    + ' · <b>' + totalSaved + '</b> new email' + (totalSaved === 1 ? '' : 's') + ' saved'
+    + (totalFound ? ' (' + totalFound + ' matched total)' : '')
+    + (finished ? ' — done.' : '');
 }
 
 async function openSearchEmailsModal() {
