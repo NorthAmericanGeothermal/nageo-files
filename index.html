@@ -138,6 +138,28 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
 .ctx-item.danger{color:var(--red);}
 .ctx-item.danger:hover{background:var(--red-bg);}
 .ctx-div{height:1px;background:var(--border);margin:4px 0;}
+/* ── Modal (New Folder / Rename / Delete / Search Emails / Settings /
+   Preview all share this — was missing entirely, which is why clicking any
+   of those buttons rendered its modal inline in the page instead of as a
+   floating popup. ── */
+.modal-bg{display:none;position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:400;align-items:center;justify-content:center;padding:1rem;}
+.modal-bg.open{display:flex;}
+.modal{background:var(--surface);border-radius:var(--radius);width:420px;max-width:100%;box-shadow:var(--shadow-lg);max-height:90vh;display:flex;flex-direction:column;}
+.modal-hdr{display:flex;align-items:center;justify-content:space-between;padding:18px 20px 14px;border-bottom:1px solid var(--border);flex-shrink:0;}
+.modal-title{font-size:16px;font-weight:800;color:var(--text);}
+.modal-close{background:none;border:none;font-size:16px;color:var(--text3);cursor:pointer;padding:4px 6px;border-radius:6px;line-height:1;}
+.modal-close:hover{background:var(--bg);color:var(--text);}
+.modal-body{padding:18px 20px 20px;overflow-y:auto;min-height:0;}
+.modal-label{display:block;font-size:13px;font-weight:600;color:var(--text2);margin-bottom:8px;}
+.modal-input{width:100%;padding:11px 13px;border:1.5px solid var(--border);border-radius:8px;font-size:14.5px;font-family:inherit;background:#f8fafc;color:var(--text);}
+.modal-input:focus{outline:none;border-color:var(--blue);background:#fff;}
+.modal-btns{display:flex;justify-content:flex-end;gap:8px;margin-top:18px;}
+.modal-cancel{padding:10px 16px;border:none;border-radius:8px;background:#eef2f7;color:var(--text2);cursor:pointer;font-size:14px;font-weight:600;font-family:inherit;}
+.modal-cancel:hover{background:var(--border);}
+.modal-ok{padding:10px 18px;border:none;border-radius:8px;background:var(--blue);color:#fff;cursor:pointer;font-size:14px;font-weight:700;font-family:inherit;}
+.modal-ok:hover{background:#1d5cb8;}
+.modal-ok.modal-danger{background:var(--red);}
+.modal-ok.modal-danger:hover{background:#b91c1c;}
 .upload-bar{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid var(--border);padding:12px 20px;display:none;align-items:center;gap:14px;z-index:200;box-shadow:0 -4px 16px rgba(0,0,0,.08);}
 .upload-bar.show{display:flex;}
 .upload-bar-info{flex:1;}
@@ -162,7 +184,7 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
    sandboxed iframe so a mail client's raw HTML (its own <style>/<head>,
    quoted history, tracking pixels) can't break this page's styling. Same
    pattern as the GRECs tool's "View Email" thread tiles. ── */
-.se-modal-body{padding:16px 20px 20px;max-height:75vh;overflow-y:auto;}
+.se-modal-body{padding:16px 20px 20px;max-height:75vh;overflow-y:auto;min-height:0;}
 .se-meta{font-size:12.5px;color:var(--text3);margin-bottom:14px;}
 .se-empty{padding:2rem 1rem;text-align:center;color:var(--text3);font-size:14px;line-height:1.6;}
 .se-section-label{font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px;}
