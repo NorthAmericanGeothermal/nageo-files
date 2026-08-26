@@ -11,11 +11,15 @@ const REG_KEY = "nageo_files_reg";
 // account connected from Files shows up in GRECs/Leads too, and vice versa.
 const GOOGLE_CLIENT_ID = "924555050056-jp3k8vpo89tb14vfghjqefrb1aaik21e.apps.googleusercontent.com";
 const GOOGLE_OAUTH_REDIRECT_URI = SUPABASE_URL + "/functions/v1/lead-gmail-oauth";
-// gmail_accounts.rep_id is a uuid column — lead-gmail-oauth's callback
-// writes whatever comes back as `state` straight into it, so it has to be a
-// real UUID. Files doesn't have per-user logins/real reps, so every account
-// connected from this tool shares this one fixed placeholder id.
-const NAGEO_FILES_PLACEHOLDER_REP_ID = "8e8f3f0a-9c1e-4b2a-9f3d-4e1c2b6a7d10";
+// gmail_accounts.rep_id is a uuid column with a foreign key into `reps` —
+// lead-gmail-oauth's callback writes whatever comes back as `state` straight
+// into it, so a made-up UUID isn't enough, it has to be a real rep's id.
+// Files doesn't have per-user logins/real reps, so every account connected
+// from this tool gets tagged with this one existing rep's id (Michael's,
+// from an already-connected gmail_accounts row) — purely as a placeholder
+// FK target, not an access restriction: every tool still searches the whole
+// shared pool regardless of which rep_id an account is tagged with.
+const NAGEO_FILES_PLACEHOLDER_REP_ID = "3edad42d-01ff-4f58-b8e3-53e4ef634f68";
 // Name of the protected, auto-created folder each customer gets the first
 // time a saved search email needs somewhere to live. Locked — the app
 // blocks renaming/deleting/moving it or its contents, and blocks manual
