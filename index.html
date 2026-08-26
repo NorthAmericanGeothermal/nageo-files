@@ -10,6 +10,7 @@
 :root{
   --navy:#0f2341;--navy2:#1a3561;--blue:#2e73d4;--blue-light:#dbeafe;
   --green:#16a34a;--green-bg:#dcfce7;--red:#dc2626;--red-bg:#fee2e2;
+  --amber:#b45309;--amber-bg:#fef3c7;--amber-border:#f0b429;
   --bg:#f0f4f8;--surface:#ffffff;--border:#e2e8f0;
   --text:#0f172a;--text2:#475569;--text3:#94a3b8;
   --radius:14px;--radius-sm:8px;
@@ -118,6 +119,14 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
 .card-checkbox.checked{background:var(--blue);border-color:var(--blue);display:flex;align-items:center;justify-content:center;}
 .card-checkbox.checked::after{content:'✓';color:#fff;font-size:13px;font-weight:800;}
 .file-content.select-mode .card-menu{display:none!important;}
+/* Protected system folder ("📧 Emails") — auto-filled by email search, never
+   editable by hand. Visually distinct on purpose so it's obviously not a
+   normal folder: amber border/background instead of the default card look,
+   no hover-lift, cursor stays a pointer (it can still be opened). */
+.folder-card-system{background:var(--amber-bg);border:1.5px solid var(--amber-border);cursor:pointer;}
+.folder-card-system:hover{border-color:var(--amber-border);box-shadow:var(--shadow);transform:none;}
+.folder-card-system .card-name{color:var(--amber);}
+.card-system-badge{position:absolute;top:7px;right:7px;font-size:14px;line-height:1;opacity:.85;}
 .folder-empty-area{padding:3rem 1rem;text-align:center;color:var(--text3);}
 .folder-empty-icon{font-size:52px;margin-bottom:12px;opacity:.4;}
 .folder-empty-strong{font-size:17px;font-weight:700;color:var(--text2);margin-bottom:6px;}
