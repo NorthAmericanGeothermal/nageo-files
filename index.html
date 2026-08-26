@@ -185,6 +185,26 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
 .se-progress-text{font-size:13px;color:var(--text2);margin-top:8px;line-height:1.5;}
 .se-progress-stop{margin-top:8px;padding:8px 14px;border:1px solid var(--border);border-radius:8px;background:#fff;color:var(--text2);font-size:12.5px;font-weight:600;cursor:pointer;}
 .se-progress-stop:hover{background:var(--bg);}
+/* ── Global Settings modal: Gmail account pool + Sync All Customers ── */
+.settings-section{margin-bottom:22px;}
+.settings-section:last-child{margin-bottom:0;}
+.settings-section-desc{font-size:13px;color:var(--text2);line-height:1.55;margin-bottom:12px;}
+.gmail-acct-list{display:flex;flex-direction:column;gap:6px;margin-bottom:12px;max-height:220px;overflow-y:auto;}
+.gmail-acct-row{display:flex;align-items:center;gap:8px;padding:9px 10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;font-size:13.5px;}
+.gmail-acct-email{flex:1;min-width:0;word-break:break-all;font-weight:600;color:var(--text);}
+.gmail-acct-status{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:3px 8px;border-radius:999px;flex-shrink:0;}
+.gmail-acct-status.connected{background:var(--green-bg);color:var(--green);}
+.gmail-acct-status.error{background:var(--red-bg);color:var(--red);}
+.se-search-btn.btn-secondary{background:#eef2f7;color:var(--text2);margin-bottom:0;}
+.se-search-btn.btn-secondary:hover{background:#e2e8f0;}
+.sweep-summary{font-size:13px;color:var(--text2);margin:10px 0 0;line-height:1.6;}
+.sweep-summary b{color:var(--text);}
+.sweep-log{max-height:220px;overflow-y:auto;margin-top:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);}
+.sweep-log-row{padding:7px 10px;font-size:12.5px;border-bottom:1px solid var(--border);display:flex;gap:8px;}
+.sweep-log-row:last-child{border-bottom:none;}
+.sweep-log-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text2);}
+.sweep-log-result{flex-shrink:0;color:var(--text3);}
+.sweep-log-row.has-new .sweep-log-result{color:var(--green);font-weight:700;}
 .se-tiles{display:flex;flex-direction:column;gap:8px;}
 .se-tile{border:1.5px solid var(--border);border-radius:10px;overflow:hidden;background:#fff;}
 .se-tile-hdr{display:flex;align-items:center;gap:10px;padding:11px 13px;cursor:pointer;user-select:none;}
@@ -261,6 +281,7 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
       <div class="search-results" id="searchResults"></div>
     </div>
     <div class="topbar-right">
+      <button class="topbar-btn" id="globalSettingsBtn" title="Gmail accounts & sync all customers">⚙ Settings</button>
       <button class="topbar-btn" id="signOutBtn">Sign out</button>
     </div>
   </div>
@@ -409,6 +430,36 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
         <button class="se-progress-stop" id="searchEmailsStopBtn">Stop after this pass</button>
       </div>
       <div id="searchEmailsResults"></div>
+    </div>
+  </div>
+</div>
+<!-- Global Settings Modal — Gmail accounts + Sync All Customers -->
+<div class="modal-bg" id="modalGlobalSettings">
+  <div class="modal" style="max-width:640px;width:92vw;">
+    <div class="modal-hdr">
+      <div class="modal-title">⚙ Settings</div>
+      <button class="modal-close" onclick="closeModal('modalGlobalSettings')">✕</button>
+    </div>
+    <div class="se-modal-body">
+      <div class="settings-section">
+        <div class="se-section-label">Gmail Accounts</div>
+        <div class="settings-section-desc">The shared pool of connected Gmail accounts that "Search Emails" and "Search All Customers" pull from. Any connected account here gets searched — connect more to widen coverage.</div>
+        <div class="gmail-acct-list" id="gmailAccountsList"></div>
+        <button class="se-search-btn btn-secondary" id="connectGmailBtn" style="margin-bottom:8px;">➕ Connect Gmail Account</button>
+        <button class="se-search-btn btn-secondary" id="refreshGmailPoolBtn">↻ Refresh List</button>
+      </div>
+      <div class="settings-section">
+        <div class="se-section-label">Sync All Customers</div>
+        <div class="settings-section-desc">Searches every customer's email address(es) — across every connected Gmail account above — and auto-saves anything found into each customer's locked 📧 Emails folder. This walks the entire customer list one at a time, so it can take a long time; leave this tab open while it runs, or click Stop to pause after the current customer.</div>
+        <button class="se-search-btn" id="sweepAllBtn">🔄 Search All Customers</button>
+        <div class="se-progress" id="sweepProgress">
+          <div class="se-progress-bar"><div class="se-progress-fill"></div></div>
+          <div class="se-progress-text" id="sweepProgressText">Starting…</div>
+          <button class="se-progress-stop" id="sweepStopBtn">Stop after this customer</button>
+        </div>
+        <div class="sweep-summary" id="sweepSummary" style="display:none;"></div>
+        <div class="sweep-log" id="sweepLog" style="display:none;"></div>
+      </div>
     </div>
   </div>
 </div>
