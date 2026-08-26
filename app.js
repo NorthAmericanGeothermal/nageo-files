@@ -3,6 +3,7 @@ const SUPABASE_URL = "https://hpgwwegjsxyxovdattoc.supabase.co";
 const SUPABASE_KEY = "sb_publishable_D2PqYQoJjZ8koEM9NPvmeg_KB_Wa66H";
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const HCP_CUSTOMERS_URL = SUPABASE_URL + "/functions/v1/nageo-files-hcp-customers";
+const SEARCH_EMAILS_URL = SUPABASE_URL + "/functions/v1/nageo-files-search-emails";
 const STORAGE_BUCKET = "nageo-files-documents";
 const REG_KEY = "nageo_files_reg";
 // ── STATE ──
@@ -90,6 +91,8 @@ function wireEvents() {
   document.getElementById("selectCancelBtn").addEventListener("click", () => { if (selectMode) toggleSelectMode(); });
   document.getElementById("selectDownloadBtn").addEventListener("click", bulkDownloadSelected);
   document.getElementById("selectDeleteBtn").addEventListener("click", confirmBulkDelete);
+  // Search emails
+  document.getElementById("searchEmailBtn").addEventListener("click", openSearchEmailsModal);
   // Drag and drop (file system → upload)
   const fc = document.getElementById("fileContent");
   fc.addEventListener("dragover", e => { e.preventDefault(); document.getElementById("dropOverlay").classList.add("active"); });
@@ -857,6 +860,87 @@ async function jumpToFile(customerId, folderId, fileId) {
     const file = (data || []).find(f => f.id === fileId);
     if (file) previewFile(file);
   } catch (e) {}
+}
+// ── SEARCH EMAILS — on-demand Gmail search across the shared connected-
+// account pool for the current customer's email address. Nothing is
+// stored; this just searches live at the moment the button is clicked. ──
+async function openSearchEmailsModal() {
+  if (!currentCustomer) return;
+  const body = document.getElementById("searchEmailsBody");
+  var email = (currentCustomer.email || "").trim();
+  if (!email) {
+    body.innerHTML = '<div class="se-empty">No email address on file for ' + esc(currentCustomer.name) + ' — nothing to search for.</div>';
+    openModal("modalSearchEmails");
+    return;
+  }
+  body.innerHTML = '<div class="se-meta">Searching every connected Gmail account for messages to/from <strong>' + esc(email) + '</strong>…</div><div class="se-empty">Searching…</div>';
+  openModal("modalSearchEmails");
+  try {
+    const res = await fetch(SEARCH_EMAILS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + SUPABASE_KEY, "apikey": SUPABASE_KEY },
+      body: JSON.stringify({ emails: [email] }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    renderSearchEmailsResults(email, data.results || [], data.accounts_searched || 0, data.note || null);
+  } catch (e) {
+    body.innerHTML = '<div class="se-empty">❌ Could not search — ' + esc(e.message) + '</div>';
+  }
+}
+function renderSearchEmailsResults(email, results, accountsSearched, note) {
+  const body = document.getElementById("searchEmailsBody");
+  var metaHtml = '<div class="se-meta">' + results.length + ' message' + (results.length === 1 ? '' : 's') + ' found across ' + accountsSearched + ' connected account' + (accountsSearched === 1 ? '' : 's') + ' for <strong>' + esc(email) + '</strong>.</div>';
+  if (note) metaHtml = '<div class="se-meta">' + esc(note) + '</div>';
+  if (!results.length) {
+    body.innerHTML = metaHtml + '<div class="se-empty">No emails found for this address in any connected Gmail account.</div>';
+    return;
+  }
+  var html = metaHtml + '<div class="se-tiles">';
+  results.forEach(function (r, idx) {
+    var dateStr = r.date ? new Date(r.date).toLocaleString() : '';
+    html += '<div class="se-tile' + (idx === 0 ? ' open' : '') + '">'
+      + '<div class="se-tile-hdr" onclick="toggleSearchEmailTile(this)">'
+      + '<div style="flex:1;min-width:0;"><div class="se-tile-who">' + esc(r.from || '—') + '</div><div class="se-tile-sub">' + esc(r.subject || '(no subject)') + '</div></div>'
+      + '<span class="se-tile-date">' + esc(dateStr) + '</span>'
+      + '<span class="se-tile-chevron">▾</span>'
+      + '</div>'
+      + '<div class="se-tile-body"><div class="se-frame-card"><iframe class="se-frame" id="se-frame-' + idx + '" sandbox="allow-popups allow-same-origin" title="Email"></iframe></div></div>'
+      + '</div>';
+  });
+  html += '</div>';
+  body.innerHTML = html;
+  results.forEach(function (r, idx) {
+    var frame = document.getElementById('se-frame-' + idx);
+    if (!frame) return;
+    var content = (r.html && r.html.trim()) ? r.html : (r.text ? esc(r.text).replace(/\n/g, '<br>') : (r.snippet || ''));
+    fillSearchEmailFrame(frame, content);
+  });
+}
+function toggleSearchEmailTile(hdrEl) {
+  var tile = hdrEl.closest(".se-tile");
+  if (tile) tile.classList.toggle("open");
+}
+function fillSearchEmailFrame(iframe, htmlContent) {
+  if (!iframe) return;
+  var trimmed = htmlContent && htmlContent.trim();
+  var doc;
+  if (!trimmed) {
+    doc = '<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{margin:0;padding:10px 12px;font-family:-apple-system,sans-serif;font-size:13px;color:#888;background:#fff;}</style></head><body><em>No content available for this message.</em></body></html>';
+  } else if (/^\s*<!DOCTYPE html|^\s*<html/i.test(trimmed)) {
+    doc = trimmed;
+  } else {
+    doc = '<!DOCTYPE html><html><head><meta charset="utf-8">'
+      + '<style>*{box-sizing:border-box;}body{margin:0;padding:10px 12px;font-family:-apple-system,sans-serif;font-size:13px;line-height:1.55;color:#1a1a1a;background:#fff;word-wrap:break-word;overflow-wrap:break-word;}img{max-width:100%;height:auto;}a{color:#2e73d4;}table{max-width:100%;}</style>'
+      + '</head><body>' + trimmed + '</body></html>';
+  }
+  iframe.onload = function () {
+    try {
+      var h = iframe.contentWindow.document.body.scrollHeight;
+      iframe.style.height = Math.max(40, h + 4) + "px";
+    } catch (e) { iframe.style.height = "200px"; }
+  };
+  iframe.setAttribute("srcdoc", doc);
 }
 // ── CONTEXT MENU ──
 function showCtx(event, type, data) {
