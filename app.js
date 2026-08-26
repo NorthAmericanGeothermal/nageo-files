@@ -4,6 +4,7 @@ const SUPABASE_KEY = "sb_publishable_D2PqYQoJjZ8koEM9NPvmeg_KB_Wa66H";
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const HCP_CUSTOMERS_URL = SUPABASE_URL + "/functions/v1/nageo-files-hcp-customers";
 const SEARCH_EMAILS_URL = SUPABASE_URL + "/functions/v1/nageo-files-search-emails";
+const THREAD_SUMMARY_URL = SUPABASE_URL + "/functions/v1/nageo-files-thread-summary";
 const STORAGE_BUCKET = "nageo-files-documents";
 const REG_KEY = "nageo_files_reg";
 // Same shared Gmail OAuth app + redirect used by NAGeo GRECs' "Connect Gmail"
@@ -32,6 +33,11 @@ let filteredCustomers = [];
 let currentCustomer = null;
 let currentFolderId = null;
 let currentFolderIsSystem = false; // true while viewing inside the locked Emails folder
+// The current folder's own DB row (name, is_system, gmail_thread_id,
+// ai_overview, …) — fetched fresh on every navigation in loadFileView so the
+// AI overview panel always reflects the latest saved summary, including
+// right after clicking Regenerate. null at the customer root.
+let currentFolderRow = null;
 let breadcrumbs = []; // [{id, name, isSystem}]
 let ctxTarget = null; // {type:'folder'|'file', data}
 let renameTarget = null;
@@ -244,7 +250,7 @@ function filterCustomers(q) {
     c.name.toLowerCase().includes(lq) ||
     c.customer_id.includes(lq) ||
     c.address.toLowerCase().includes(lq) ||
-    c.email.toLowerCase().includes(lq) ||
+    (Array.isArray(c.emails) ? c.emails : [c.email]).some(e => (e || "").toLowerCase().includes(lq)) ||
     c.phone.includes(lq)
   );
   renderCustomerList(filteredCustomers);
@@ -296,6 +302,17 @@ async function loadFileView() {
     <div style="padding:2rem;text-align:center;color:var(--text3);">Loading…</div>
   `;
   rewireDrop();
+  // Fetch the current folder's own row fresh on every navigation (not
+  // cached) so the AI overview panel always reflects the latest saved
+  // summary — important right after clicking Regenerate.
+  currentFolderRow = null;
+  if (currentFolderId) {
+    try {
+      const { data } = await sb.from("nageo_files_folders").select("*").eq("id", currentFolderId).single();
+      currentFolderRow = data || null;
+    } catch (e) { currentFolderRow = null; }
+  }
+  renderThreadOverviewBar();
   try {
     let foldersQuery = sb.from("nageo_files_folders").select("*").eq("customer_id", currentCustomer.id);
     let filesQuery = sb.from("nageo_files_files").select("*").eq("customer_id", currentCustomer.id);
@@ -412,6 +429,57 @@ function updateSystemFolderUI() {
     const el = document.getElementById(id);
     if (el) el.style.display = hide ? "none" : "";
   });
+}
+// ── AI THREAD OVERVIEW — only shown when currentFolderRow is one of the
+// auto-created thread subfolders (has gmail_thread_id set). On-demand only:
+// nothing is summarized until someone actually clicks the button, and the
+// result is saved on the folder row and reused until Regenerate is clicked. ──
+function renderThreadOverviewBar() {
+  var el = document.getElementById("threadOverviewBar");
+  if (!el) return;
+  if (!currentFolderRow || !currentFolderRow.gmail_thread_id) {
+    el.style.display = "none";
+    el.innerHTML = "";
+    return;
+  }
+  el.style.display = "block";
+  if (currentFolderRow.ai_overview) {
+    var when = currentFolderRow.ai_overview_generated_at ? new Date(currentFolderRow.ai_overview_generated_at).toLocaleString() : "";
+    el.innerHTML = '<div class="ai-overview-card">'
+      + '<div class="ai-overview-hdr"><span>✨ AI Overview</span><span class="ai-overview-when">' + esc(when) + '</span></div>'
+      + '<div class="ai-overview-text">' + esc(currentFolderRow.ai_overview).replace(/\n/g, '<br>') + '</div>'
+      + '<button class="ai-overview-btn" id="aiOverviewBtn">🔄 Regenerate</button>'
+      + '</div>';
+  } else {
+    el.innerHTML = '<div class="ai-overview-card ai-overview-empty">'
+      + '<div class="ai-overview-empty-text">Get a quick AI-written summary of this whole email thread — generated once, on demand, and reused until you click Regenerate.</div>'
+      + '<button class="ai-overview-btn" id="aiOverviewBtn">✨ Get AI Overview</button>'
+      + '</div>';
+  }
+  var btn = document.getElementById("aiOverviewBtn");
+  if (btn) btn.addEventListener("click", requestAiOverview);
+}
+async function requestAiOverview() {
+  if (!currentFolderRow || !currentCustomer) return;
+  var btn = document.getElementById("aiOverviewBtn");
+  var wasRegenerate = !!currentFolderRow.ai_overview;
+  if (btn) { btn.disabled = true; btn.textContent = "Summarizing…"; }
+  try {
+    const res = await fetch(THREAD_SUMMARY_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + SUPABASE_KEY, "apikey": SUPABASE_KEY },
+      body: JSON.stringify({ customer_id: currentCustomer.id, folder_id: currentFolderRow.id }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    currentFolderRow.ai_overview = data.overview;
+    currentFolderRow.ai_overview_generated_at = data.generated_at || new Date().toISOString();
+    renderThreadOverviewBar();
+    toast(wasRegenerate ? "✨ Overview regenerated." : "✨ AI overview ready.", "ok");
+  } catch (e) {
+    toast("❌ Could not generate overview: " + e.message, "err");
+    if (btn) { btn.disabled = false; btn.textContent = wasRegenerate ? "🔄 Regenerate" : "✨ Get AI Overview"; }
+  }
 }
 // ── NAVIGATION ──
 function openFolder(folder) {
@@ -1005,26 +1073,100 @@ function buildEmailArchiveHtml(r) {
     + '<style>*{box-sizing:border-box;}body{margin:0;font-family:-apple-system,sans-serif;background:#fff;}.email-body{padding:16px;font-size:13px;line-height:1.55;color:#1a1a1a;word-wrap:break-word;overflow-wrap:break-word;}img{max-width:100%;height:auto;}a{color:#2e73d4;}table{max-width:100%;}</style>'
     + '</head><body>' + headerHtml + '<div class="email-body">' + bodyContent + '</div></body></html>';
 }
+// Finds (or creates) the locked thread subfolder a message belongs in, keyed
+// by account + Gmail thread id — not by name, since lots of threads share
+// the same subject ("Update", "North American Geothermal", …) and thread id
+// is what actually tells two messages apart. `cache` is a plain object the
+// caller passes in and reuses across one saveEmailsToFolder call, so a
+// 40-message thread doesn't do 40 redundant lookups.
+async function getOrCreateThreadFolder(customerId, emailsFolderId, r, cache) {
+  var key = r.account + ":" + r.gmail_thread_id;
+  if (cache[key]) return cache[key];
+  const { data: existing, error: findErr } = await sb.from("nageo_files_folders")
+    .select("*").eq("customer_id", customerId).eq("gmail_account", r.account).eq("gmail_thread_id", r.gmail_thread_id).limit(1);
+  if (findErr) throw findErr;
+  if (existing && existing.length) { cache[key] = existing[0]; return existing[0]; }
+  const { data, error } = await sb.from("nageo_files_folders").insert({
+    customer_id: customerId,
+    parent_id: emailsFolderId,
+    name: threadFolderName(r.subject, r.date),
+    is_system: true,
+    gmail_thread_id: r.gmail_thread_id,
+    gmail_account: r.account,
+  }).select().single();
+  if (error) {
+    if (error.code === "23505") {
+      // Unique-violation race — another concurrent save just created this
+      // exact thread folder a moment ago. Fetch it instead of failing.
+      const { data: raced } = await sb.from("nageo_files_folders")
+        .select("*").eq("customer_id", customerId).eq("gmail_account", r.account).eq("gmail_thread_id", r.gmail_thread_id).limit(1).single();
+      if (raced) { cache[key] = raced; return raced; }
+    }
+    throw error;
+  }
+  cache[key] = data;
+  return data;
+}
+function threadFolderName(subject, firstDate) {
+  var base = (subject && subject.trim()) ? subject.trim() : "(no subject)";
+  base = base.replace(/[\\/:*?"<>|]/g, "-").slice(0, 70).trim() || "email";
+  var dateStr = "";
+  if (firstDate) {
+    var d = new Date(firstDate);
+    if (!isNaN(d.getTime())) dateStr = " (" + d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) + ")";
+  }
+  return "💬 " + base + dateStr;
+}
 // Saves every not-yet-saved message in `results` into customerId's locked
-// Emails folder, de-duped against gmail_message_id (both against what's
-// already in the DB and within this batch), and returns how many were newly
-// saved. Safe to call repeatedly with overlapping/duplicate result sets —
-// that's the whole point, since a re-run of Search Emails will re-find
-// messages already archived from a previous search.
+// Emails folder, grouped into one locked subfolder per email thread (see
+// getOrCreateThreadFolder) — de-duped against gmail_message_id (both against
+// what's already in the DB and within this batch). Returns how many were
+// newly saved. Safe to call repeatedly with overlapping/duplicate result
+// sets — that's the whole point, since a re-run of Search Emails will
+// re-find messages already archived from a previous search. It also
+// self-heals: any message saved before thread grouping existed (sitting
+// flat in the Emails folder with no thread id) gets backfilled and moved
+// into its correct thread subfolder the next time it turns up in a search.
 async function saveEmailsToFolder(customerId, results) {
   if (!results || !results.length) return 0;
-  const folder = await getOrCreateEmailsFolder(customerId);
+  const emailsFolder = await getOrCreateEmailsFolder(customerId);
   const ids = results.map(function (r) { return r.gmail_message_id; }).filter(Boolean);
-  let already = new Set();
+  let existingByMsgId = {};
   if (ids.length) {
     const { data: existingRows, error: existErr } = await sb.from("nageo_files_files")
-      .select("gmail_message_id").eq("customer_id", customerId).in("gmail_message_id", ids);
+      .select("id, gmail_message_id, folder_id").eq("customer_id", customerId).in("gmail_message_id", ids);
     if (existErr) throw existErr;
-    (existingRows || []).forEach(function (row) { already.add(row.gmail_message_id); });
+    (existingRows || []).forEach(function (row) { existingByMsgId[row.gmail_message_id] = row; });
   }
+  var threadFolderCache = {};
   let savedCount = 0;
   for (const r of results) {
-    if (!r.gmail_message_id || already.has(r.gmail_message_id)) continue;
+    if (!r.gmail_message_id) continue;
+    var existing = existingByMsgId[r.gmail_message_id];
+    var targetFolder = emailsFolder;
+    if (r.gmail_thread_id && r.account) {
+      try {
+        targetFolder = await getOrCreateThreadFolder(customerId, emailsFolder.id, r, threadFolderCache);
+      } catch (e) {
+        console.warn("Could not group into a thread folder, saving flat instead:", e);
+        targetFolder = emailsFolder;
+      }
+    }
+    if (existing) {
+      // Already saved — if it's sitting somewhere other than its correct
+      // thread folder (e.g. saved flat before threading existed), move it
+      // and backfill its thread id now that we know it.
+      if (existing.folder_id !== targetFolder.id) {
+        try {
+          await sb.from("nageo_files_files").update({
+            folder_id: targetFolder.id,
+            gmail_thread_id: r.gmail_thread_id || null,
+            updated_at: new Date().toISOString(),
+          }).eq("id", existing.id);
+        } catch (e) { console.warn("Failed to regroup existing saved email:", r.subject, e); }
+      }
+      continue;
+    }
     try {
       const archiveHtml = buildEmailArchiveHtml(r);
       const bytes = new TextEncoder().encode(archiveHtml);
@@ -1035,13 +1177,14 @@ async function saveEmailsToFolder(customerId, results) {
       if (upErr) throw upErr;
       const { error: insErr } = await sb.from("nageo_files_files").insert({
         customer_id: customerId,
-        folder_id: folder.id,
+        folder_id: targetFolder.id,
         name: sanitizeEmailFileName(r),
         size: bytes.length,
         mime_type: "text/html",
         storage_path: storagePath,
         gmail_message_id: r.gmail_message_id,
         gmail_account: r.account || null,
+        gmail_thread_id: r.gmail_thread_id || null,
       });
       if (insErr) {
         // 23505 = unique violation on (customer_id, gmail_message_id) — a
@@ -1049,17 +1192,15 @@ async function saveEmailsToFolder(customerId, results) {
         // Clean up the storage object we just uploaded and move on quietly.
         await sb.storage.from(STORAGE_BUCKET).remove([storagePath]);
         if (insErr.code !== "23505") throw insErr;
-        already.add(r.gmail_message_id);
         continue;
       }
-      already.add(r.gmail_message_id);
       savedCount++;
     } catch (e) {
       console.warn("Failed to save email to Emails folder:", r.subject, e);
     }
   }
-  if (savedCount && currentCustomer && currentCustomer.id === customerId && currentFolderId === folder.id) {
-    loadFileView(); // live-refresh if the user happens to already be looking at the Emails folder
+  if (savedCount && currentCustomer && currentCustomer.id === customerId) {
+    loadFileView(); // live-refresh if the user happens to already be looking at this customer's files
   }
   return savedCount;
 }
@@ -1215,7 +1356,14 @@ async function startSweepAllCustomers() {
     if (sweepCancelled) break;
     var c = customers[i];
     var emails = [];
-    if (c.email && c.email.trim()) emails.push(c.email.trim().toLowerCase());
+    // Every email HCP has on file for this customer (falls back to the
+    // single .email field for older cached customer objects that predate
+    // the .emails array).
+    var hcpEmails = (Array.isArray(c.emails) && c.emails.length) ? c.emails : (c.email ? [c.email] : []);
+    hcpEmails.forEach(function (e) {
+      var v = (e || "").trim().toLowerCase();
+      if (v && emails.indexOf(v) === -1) emails.push(v);
+    });
     (manualByCustomer[c.id] || []).forEach(function (e) {
       var v = (e || "").trim().toLowerCase();
       if (v && emails.indexOf(v) === -1) emails.push(v);
@@ -1279,8 +1427,17 @@ async function openSearchEmailsModal() {
 }
 async function loadSearchEmailsList() {
   searchEmailsList = [];
-  var hcpEmail = (currentCustomer.email || "").trim();
-  if (hcpEmail) searchEmailsList.push({ email: hcpEmail, source: "hcp" });
+  // Every email HCP has on file for this customer (falls back to the single
+  // .email field for older cached customer objects that predate .emails).
+  var hcpEmails = (Array.isArray(currentCustomer.emails) && currentCustomer.emails.length)
+    ? currentCustomer.emails
+    : (currentCustomer.email ? [currentCustomer.email] : []);
+  hcpEmails.forEach(function (e) {
+    var v = (e || "").trim();
+    if (v && !searchEmailsList.some(function (x) { return x.email.toLowerCase() === v.toLowerCase(); })) {
+      searchEmailsList.push({ email: v, source: "hcp" });
+    }
+  });
   try {
     const { data, error } = await sb.from("nageo_files_manual_emails").select("*").eq("customer_id", searchEmailsCustomerId).order("created_at");
     if (!error && data) {
