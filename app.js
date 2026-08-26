@@ -1,4 +1,4 @@
-// NAGeo Files — app.js (Supabase-backed — replaces the old Cloudflare Worker)
+// NAGeo Files — app.js (Supabase-backed — replaces the old Cloudflare Worker) . 
 const SUPABASE_URL = "https://hpgwwegjsxyxovdattoc.supabase.co";
 const SUPABASE_KEY = "sb_publishable_D2PqYQoJjZ8koEM9NPvmeg_KB_Wa66H";
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
