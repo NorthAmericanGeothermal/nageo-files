@@ -1119,7 +1119,13 @@ function connectGmailAccount() {
     // Same scope set GRECs' connect flow requests, so an account connected
     // from either tool ends up with identical permissions in the shared pool.
     scope: "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.metadata https://www.googleapis.com/auth/gmail.send",
-    state: "",
+    // lead-gmail-oauth's callback requires a non-empty state (it uses this
+    // as rep_id and errors with "Missing code or rep id from Google" if it's
+    // blank — Files has no per-user login to supply a real one, so this is
+    // just a stable placeholder marking accounts connected from this tool.
+    // It's metadata only; every tool still searches the whole shared pool
+    // regardless of which rep_id an account was connected under.
+    state: "nageo-files",
   });
   window.open("https://accounts.google.com/o/oauth2/v2/auth?" + params.toString(), "_blank");
   toast("Complete the Google sign-in in the new tab, then come back and click Refresh List.", "ok");
