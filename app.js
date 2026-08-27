@@ -2288,6 +2288,15 @@ async function startEmailSearch() {
         toast("⚠️ Search finished but saving to the Emails folder failed: " + e.message, "err");
       }
     }
+    // Always organize after a sync — even when this search turned up
+    // nothing new. That's what catches/fixes backlog issues (duplicates,
+    // misfiled emails, stale dates) sitting in this customer's
+    // ALREADY-saved emails, independent of whatever this particular search
+    // did or didn't find. saveEmailsToFolder above already triggers its own
+    // organize pass when it saved/regrouped something, so this is a cheap
+    // no-op in that case and the only thing that actually runs it otherwise.
+    try { await organizeCustomerEmails(searchEmailsCustomerId, { silent: true }); } catch (e) { /* best-effort */ }
+    if (currentCustomer && currentCustomer.id === searchEmailsCustomerId) loadFileView();
   }
   if (!allResults.length && !stoppedReason) {
     document.getElementById("searchEmailsResults").innerHTML = '<div class="se-empty">No emails found for any address on this list, across ' + accountsSearched + ' connected account' + (accountsSearched === 1 ? '' : 's') + '.</div>';
