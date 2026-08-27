@@ -77,6 +77,7 @@ function wireEvents() {
   document.getElementById("connectGmailBtn").addEventListener("click", connectGmailAccount);
   document.getElementById("refreshGmailPoolBtn").addEventListener("click", loadGmailPool);
   document.getElementById("sweepAllBtn").addEventListener("click", startSweepAllCustomers);
+  document.getElementById("organizeAllBtn").addEventListener("click", startOrganizeAllCustomers);
   document.getElementById("sweepStopBtn").addEventListener("click", function () { sweepCancelled = true; });
   // Sign out
   document.getElementById("signOutBtn").addEventListener("click", () => {
@@ -127,10 +128,17 @@ function wireEvents() {
   document.getElementById("selectCancelBtn").addEventListener("click", () => { if (selectMode) toggleSelectMode(); });
   document.getElementById("selectDownloadBtn").addEventListener("click", bulkDownloadSelected);
   document.getElementById("selectDeleteBtn").addEventListener("click", confirmBulkDelete);
-  // Search emails
-  document.getElementById("searchEmailBtn").addEventListener("click", openSearchEmailsModal);
-  document.getElementById("organizeEmailsBtn").addEventListener("click", runOrganizeForCurrentCustomer);
-  document.getElementById("smartMergeBtn").addEventListener("click", openSmartMergeModal);
+  // Email tools — collapsed under one "📧 Email Tools" dropdown so the
+  // action bar doesn't keep growing as more email (and eventually other
+  // file-type) features get added.
+  document.getElementById("emailToolsBtn").addEventListener("click", function (e) { e.stopPropagation(); toggleEmailToolsDropdown(); });
+  document.getElementById("searchEmailBtn").addEventListener("click", function () { closeEmailToolsDropdown(); openSearchEmailsModal(); });
+  document.getElementById("organizeEmailsBtn").addEventListener("click", function () { closeEmailToolsDropdown(); runOrganizeForCurrentCustomer(); });
+  document.getElementById("smartMergeBtn").addEventListener("click", function () { closeEmailToolsDropdown(); openSmartMergeModal(); });
+  document.addEventListener("click", function (e) {
+    var dd = document.getElementById("emailToolsDropdown");
+    if (dd && dd.classList.contains("show") && !dd.contains(e.target)) closeEmailToolsDropdown();
+  });
   document.getElementById("searchEmailsAddBtn").addEventListener("click", addSearchEmail);
   document.getElementById("searchEmailsAddInput").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); addSearchEmail(); } });
   document.getElementById("searchEmailsGoBtn").addEventListener("click", function () { startEmailSearch(); });
@@ -317,7 +325,6 @@ async function loadFileView() {
       currentFolderRow = data || null;
     } catch (e) { currentFolderRow = null; }
   }
-  renderThreadOverviewBar();
   try {
     let foldersQuery = sb.from("nageo_files_folders").select("*").eq("customer_id", currentCustomer.id);
     let filesQuery = sb.from("nageo_files_files").select("*").eq("customer_id", currentCustomer.id);
@@ -353,6 +360,7 @@ async function loadFileView() {
         }
       } catch (e) { /* count badge is cosmetic only — skip silently on failure */ }
     }
+    renderThreadOverviewBar(); // after lastFiles loads, so the thread header's count is accurate
     renderFileView(lastFolders, lastFiles);
   } catch (e) {
     document.getElementById("fileContent").innerHTML = `<div style="padding:2rem;text-align:center;color:var(--red);">❌ Could not load files.<br><small>${e.message}</small></div>`;
@@ -410,27 +418,32 @@ function renderFileView(folders, files) {
     }
   }
   if (files.length) {
-    html += `<div class="section-label">📄 Files</div><div class="file-grid">`;
-    files.forEach(f => {
-      const key = "file:" + f.id;
-      const selected = selectedItems.has(key);
-      const dataAttr = JSON.stringify(f).replace(/"/g,'&quot;');
-      const isSys = currentFolderIsSystem; // files inside the locked Emails folder are protected too
-      const clickHandler = (selectMode && !isSys)
-        ? `toggleItemSelect('file', ${dataAttr})`
-        : `previewFile(${dataAttr})`;
-      const dragAttrs = (selectMode || isSys) ? '' : `draggable="true" ondragstart="handleDragStart(event,'file',${dataAttr})" ondragend="handleDragEnd(event)"`;
-      html += `
-        <div class="file-card${selected ? ' card-selected' : ''}${isSys ? ' folder-card-system' : ''}" ${dragAttrs} onclick="${clickHandler}">
-          ${(selectMode && !isSys) ? `<div class="card-checkbox${selected ? ' checked' : ''}"></div>` : ''}
-          <div class="card-icon">${fileIcon(f.name)}</div>
-          <div class="card-name">${esc(f.name)}</div>
-          <div class="card-meta">${formatSize(f.size)}</div>
-          ${selectMode ? '' : `<button class="card-menu" onclick="event.stopPropagation();showCtx(event,'file',${dataAttr})">⋯</button>`}
-        </div>
-      `;
-    });
-    html += `</div>`;
+    const isEmailList = currentFolderIsSystem && files.some(f => f.gmail_message_id);
+    if (isEmailList) {
+      html += renderEmailFileList(files);
+    } else {
+      html += `<div class="section-label">📄 Files</div><div class="file-grid">`;
+      files.forEach(f => {
+        const key = "file:" + f.id;
+        const selected = selectedItems.has(key);
+        const dataAttr = JSON.stringify(f).replace(/"/g,'&quot;');
+        const isSys = currentFolderIsSystem; // files inside the locked Emails folder are protected too
+        const clickHandler = (selectMode && !isSys)
+          ? `toggleItemSelect('file', ${dataAttr})`
+          : `previewFile(${dataAttr})`;
+        const dragAttrs = (selectMode || isSys) ? '' : `draggable="true" ondragstart="handleDragStart(event,'file',${dataAttr})" ondragend="handleDragEnd(event)"`;
+        html += `
+          <div class="file-card${selected ? ' card-selected' : ''}${isSys ? ' folder-card-system' : ''}" ${dragAttrs} onclick="${clickHandler}">
+            ${(selectMode && !isSys) ? `<div class="card-checkbox${selected ? ' checked' : ''}"></div>` : ''}
+            <div class="card-icon">${fileIcon(f.name)}</div>
+            <div class="card-name">${esc(f.name)}</div>
+            <div class="card-meta">${formatSize(f.size)}</div>
+            ${selectMode ? '' : `<button class="card-menu" onclick="event.stopPropagation();showCtx(event,'file',${dataAttr})">⋯</button>`}
+          </div>
+        `;
+      });
+      html += `</div>`;
+    }
   }
   el.innerHTML = html;
   rewireDrop();
@@ -460,7 +473,7 @@ function renderThreadFolderList(folders) {
     var selected = selectedItems.has(key);
     var clickHandler = (selectMode && !isSys) ? `toggleItemSelect('folder', ${dataAttr})` : `openFolder(${dataAttr})`;
     var msgCount = lastFolderCounts[f.id] || 0;
-    var dateStr = formatThreadDate(f.last_message_at || f.first_message_at);
+    var dateStr = formatAmericanDate(f.last_message_at || f.first_message_at);
     var subjectText = (f.name || "").replace(/^💬\s*/, "");
     html += `
       <div class="thread-row${selected ? ' card-selected' : ''}" onclick="${clickHandler}">
@@ -482,18 +495,72 @@ function renderThreadFolderList(folders) {
   html += `</div>`;
   return html;
 }
-function formatThreadDate(v) {
+// American month/day/year, always with the full year (never omitted) so a
+// date badge can't be misread — e.g. "8/26/2026", not "Aug 26".
+function formatAmericanDate(v) {
   if (!v) return "";
   var d = new Date(v);
   if (isNaN(d.getTime())) return "";
-  var now = new Date();
-  var sameYear = d.getFullYear() === now.getFullYear();
-  return d.toLocaleDateString(undefined, sameYear ? { month: "short", day: "numeric" } : { month: "short", day: "numeric", year: "numeric" });
+  return (d.getMonth() + 1) + "/" + d.getDate() + "/" + d.getFullYear();
 }
 function setThreadSortOrder(v) {
   threadSortOrder = (v === "oldest") ? "oldest" : "newest";
   localStorage.setItem("nageo_files_thread_sort", threadSortOrder);
   renderFileView(lastFolders, lastFiles);
+}
+// Renders the actual saved-email list — used both inside a thread subfolder
+// and in the (rare) flat 📧 Emails root — as horizontal rows with subject,
+// sender, a formatted date, and a preview snippet, instead of the plain
+// square file tiles regular uploaded files use. Shares the same
+// Newest/Oldest sort preference as the thread-folder list above.
+function renderEmailFileList(files) {
+  var sorted = files.slice().sort(function (a, b) {
+    var da = a.email_date || a.created_at || 0;
+    var db = b.email_date || b.created_at || 0;
+    return threadSortOrder === "oldest" ? (new Date(da) - new Date(db)) : (new Date(db) - new Date(da));
+  });
+  var html = `<div class="section-label thread-list-label">
+    <span>📄 Emails</span>
+    <select class="thread-sort-select" onchange="setThreadSortOrder(this.value)">
+      <option value="newest"${threadSortOrder === "newest" ? " selected" : ""}>Newest first</option>
+      <option value="oldest"${threadSortOrder === "oldest" ? " selected" : ""}>Oldest first</option>
+    </select>
+  </div><div class="thread-list">`;
+  sorted.forEach(function (f) {
+    var key = "file:" + f.id;
+    var selected = selectedItems.has(key);
+    var dataAttr = JSON.stringify(f).replace(/"/g, '&quot;');
+    var clickHandler = selectMode ? `toggleItemSelect('file', ${dataAttr})` : `previewFile(${dataAttr})`;
+    var dateStr = formatAmericanDate(f.email_date || f.created_at);
+    var subjectText = f.subject || deriveSubjectFromFileName(f.name);
+    var senderText = shortSenderName(f.sender);
+    html += `
+      <div class="thread-row${selected ? ' card-selected' : ''}" onclick="${clickHandler}">
+        ${selectMode ? `<div class="card-checkbox${selected ? ' checked' : ''}"></div>` : `<div class="thread-row-icon">✉️</div>`}
+        <div class="thread-row-main">
+          <div class="thread-row-top">
+            <span class="thread-row-subject">${esc(subjectText)}</span>
+            ${dateStr ? `<span class="thread-row-date">${esc(dateStr)}</span>` : ''}
+          </div>
+          <div class="thread-row-meta-line">
+            ${senderText ? `<span class="thread-row-sender">${esc(senderText)}</span>` : ''}
+            ${f.snippet ? `<span class="thread-row-snippet">${esc(f.snippet)}</span>` : ''}
+          </div>
+        </div>
+        ${selectMode ? '' : `<button class="email-row-menu" onclick="event.stopPropagation();showCtx(event,'file',${dataAttr})">⋯</button>`}
+      </div>
+    `;
+  });
+  html += `</div>`;
+  return html;
+}
+// Trims a "Name <email@x.com>" From header down to just the display name
+// (falls back to the bare address if there's no name) for a compact row.
+function shortSenderName(from) {
+  if (!from) return "";
+  var m = from.match(/^"?([^"<]+)"?\s*<[^>]+>$/);
+  var name = m ? m[1].trim() : from.trim();
+  return name.length > 40 ? name.slice(0, 40) + "…" : name;
 }
 function rewireDrop() {
   const fc = document.getElementById("fileContent");
@@ -531,15 +598,27 @@ function renderThreadOverviewBar() {
   }
   el.style.display = "block";
   var backBtn = '<button class="back-to-threads-btn" id="backToThreadsBtn">← Back to Email Threads</button>';
+  // Thread header — the subject, how many emails, and the date span — so
+  // it's clear which conversation you're looking at without relying on the
+  // (often-truncated) breadcrumb above.
+  var subjectText = (currentFolderRow.name || "").replace(/^💬\s*/, "");
+  var count = lastFiles.length;
+  var firstStr = formatAmericanDate(currentFolderRow.first_message_at);
+  var lastStr = formatAmericanDate(currentFolderRow.last_message_at);
+  var rangeStr = (firstStr && lastStr) ? (firstStr === lastStr ? firstStr : (firstStr + " – " + lastStr)) : (firstStr || lastStr || "");
+  var header = '<div class="thread-page-header">'
+    + '<div class="thread-page-title">💬 ' + esc(subjectText) + '</div>'
+    + '<div class="thread-page-meta">' + count + ' email' + (count === 1 ? '' : 's') + (rangeStr ? ' · ' + esc(rangeStr) : '') + '</div>'
+    + '</div>';
   if (currentFolderRow.ai_overview) {
     var when = currentFolderRow.ai_overview_generated_at ? new Date(currentFolderRow.ai_overview_generated_at).toLocaleString() : "";
-    el.innerHTML = backBtn + '<div class="ai-overview-card">'
+    el.innerHTML = backBtn + header + '<div class="ai-overview-card">'
       + '<div class="ai-overview-hdr"><span>✨ AI Overview</span><span class="ai-overview-when">' + esc(when) + '</span></div>'
       + '<div class="ai-overview-text">' + esc(currentFolderRow.ai_overview).replace(/\n/g, '<br>') + '</div>'
       + '<button class="ai-overview-btn" id="aiOverviewBtn">🔄 Regenerate</button>'
       + '</div>';
   } else {
-    el.innerHTML = backBtn + '<div class="ai-overview-card ai-overview-empty">'
+    el.innerHTML = backBtn + header + '<div class="ai-overview-card ai-overview-empty">'
       + '<div class="ai-overview-empty-text">Get a quick AI-written summary of this whole email thread — generated once, on demand, and reused until you click Regenerate.</div>'
       + '<button class="ai-overview-btn" id="aiOverviewBtn">✨ Get AI Overview</button>'
       + '</div>';
@@ -1389,16 +1468,23 @@ async function organizeCustomerEmails(customerId, opts) {
     .select("*").eq("customer_id", customerId).in("folder_id", folderIds).order("created_at");
   if (filesErr || !files || !files.length) return { moved: 0, merged: 0, foldersRemoved: 0, backfilled: 0 };
 
-  // 1. Backfill subject (filename, always) + email_date/snippet/dedup_key
-  // (archived HTML, best-effort — a failed download just means those three
-  // stay unset for now, subject is NEVER at the mercy of it).
+  // 1. Backfill subject/email_date (from the filename — always, instant,
+  // can't fail) + sender/snippet/dedup_key (archived HTML, best-effort — a
+  // failed download only leaves those three unset for now; subject and
+  // email_date are NEVER at the mercy of it).
   var backfilled = 0;
   for (const f of files) {
     var subject = f.subject || deriveSubjectFromFileName(f.name);
     var emailDate = f.email_date || deriveDateFromFileName(f.name);
     var dedupKey = f.dedup_key || f.rfc822_message_id || null;
     var snippet = f.snippet || null;
-    var needsHtml = !f.rfc822_message_id && (!dedupKey || !f.email_date || !f.snippet);
+    var sender = f.sender || null;
+    // Download is needed if we're still missing the snippet or sender (only
+    // recoverable from the archived HTML), or if we have neither an
+    // rfc822_message_id nor a dedup_key yet (no reliable dedup fingerprint
+    // at all). NOT gated on rfc822_message_id alone — a row can already have
+    // one of those while still being missing snippet/sender.
+    var needsHtml = !f.snippet || !f.sender || (!f.rfc822_message_id && !dedupKey);
     if (needsHtml) {
       try {
         const { data: blob, error: dlErr } = await sb.storage.from(STORAGE_BUCKET).download(f.storage_path);
@@ -1407,16 +1493,18 @@ async function organizeCustomerEmails(customerId, opts) {
           const parsed = parseHeaderFieldsFromHtml(html);
           if ((!f.subject) && parsed.subject) subject = parsed.subject;
           if (!f.email_date) emailDate = parseDateSafe(parsed.date) || emailDate;
-          if (!dedupKey) dedupKey = computeDedupKey(subject, parsed.from, parsed.date || emailDate);
+          if (!f.rfc822_message_id && !dedupKey) dedupKey = computeDedupKey(subject, parsed.from, parsed.date || emailDate);
           if (!f.snippet) snippet = derivePlainSnippet(html);
+          if (!f.sender && parsed.from) sender = parsed.from;
         }
-      } catch (e) { /* proceed with whatever we already have — never blocks subject */ }
+      } catch (e) { /* proceed with whatever we already have — never blocks subject/date */ }
     }
     var patch = {};
     if (subject && subject !== f.subject) patch.subject = subject;
     if (dedupKey && dedupKey !== f.dedup_key) patch.dedup_key = dedupKey;
     if (emailDate && emailDate !== f.email_date) patch.email_date = emailDate;
     if (snippet && snippet !== f.snippet) patch.snippet = snippet;
+    if (sender && sender !== f.sender) patch.sender = sender;
     if (Object.keys(patch).length) {
       try {
         const { error: updErr } = await sb.from("nageo_files_files").update(patch).eq("id", f.id);
@@ -1690,6 +1778,7 @@ async function saveEmailsToFolder(customerId, results) {
             dedup_key: r.rfc822_message_id || computeDedupKey(r.subject, r.from, r.date),
             email_date: parseDateSafe(r.date),
             snippet: r.snippet || null,
+            sender: r.from || null,
             updated_at: new Date().toISOString(),
           }).eq("id", existingSameCopy.id);
           regroupedAny = true;
@@ -1720,6 +1809,7 @@ async function saveEmailsToFolder(customerId, results) {
         dedup_key: r.rfc822_message_id || computeDedupKey(r.subject, r.from, r.date),
         email_date: parseDateSafe(r.date),
         snippet: r.snippet || null,
+        sender: r.from || null,
       });
       if (insErr) {
         // 23505 = unique violation — either the same (customer_id,
@@ -1963,6 +2053,47 @@ async function startSweepAllCustomers() {
   toast(finishedAll
     ? ("✅ Sync complete — " + totalSaved + " new email" + (totalSaved === 1 ? "" : "s") + " saved across " + customers.length + " customers" + extraStr + ".")
     : ("⏸ Sync stopped — " + totalSaved + " new email" + (totalSaved === 1 ? "" : "s") + " saved so far" + extraStr + "."), "ok");
+}
+var organizeAllRunning = false;
+// Runs organizeCustomerEmails for every customer, one at a time — unlike
+// Search All Customers, this never talks to Gmail at all, so it's much
+// faster and is the right button to click right after an update like this
+// one, to apply the fix across every customer's already-saved emails at
+// once instead of clicking into each one individually.
+async function startOrganizeAllCustomers() {
+  if (organizeAllRunning) return;
+  if (!allCustomers.length) { toast("Customer list hasn't loaded yet — try again in a moment.", "err"); return; }
+  organizeAllRunning = true;
+  var btn = document.getElementById("organizeAllBtn");
+  var progressBox = document.getElementById("organizeAllProgress");
+  var progressText = document.getElementById("organizeAllProgressText");
+  var summaryEl = document.getElementById("organizeAllSummary");
+  btn.disabled = true;
+  progressBox.style.display = "block";
+  summaryEl.style.display = "block";
+  summaryEl.innerHTML = "";
+
+  var customers = allCustomers.slice();
+  var totalMoved = 0, totalMerged = 0, totalFoldersRemoved = 0, touched = 0;
+  for (var i = 0; i < customers.length; i++) {
+    var c = customers[i];
+    progressText.textContent = "Customer " + (i + 1) + " of " + customers.length + ": " + c.name;
+    try {
+      const result = await organizeCustomerEmails(c.id, { silent: true });
+      totalMoved += result.moved || 0;
+      totalMerged += result.merged || 0;
+      totalFoldersRemoved += result.foldersRemoved || 0;
+      if (result.moved || result.merged || result.foldersRemoved || result.backfilled) touched++;
+    } catch (e) { /* keep going — one customer's error shouldn't stop the rest */ }
+    summaryEl.innerHTML = '<b>' + (i + 1) + ' of ' + customers.length + '</b> customers checked · '
+      + touched + ' updated · ' + totalMoved + ' refiled · ' + totalMerged + ' duplicates merged · ' + totalFoldersRemoved + ' empty folders removed';
+  }
+
+  progressBox.style.display = "none";
+  btn.disabled = false;
+  organizeAllRunning = false;
+  toast("🗂️ Organized " + customers.length + " customers — " + totalMoved + " refiled, " + totalMerged + " duplicates merged, " + totalFoldersRemoved + " empty folders removed.", "ok");
+  if (currentCustomer) loadFileView();
 }
 function appendSweepLogRow(name, resultText, hasNew) {
   var logEl = document.getElementById("sweepLog");
@@ -2223,6 +2354,12 @@ function closeModal(id) {
   document.getElementById(id).classList.remove("open");
 }
 window.closeModal = closeModal;
+function toggleEmailToolsDropdown() {
+  document.getElementById("emailToolsDropdown").classList.toggle("show");
+}
+function closeEmailToolsDropdown() {
+  document.getElementById("emailToolsDropdown").classList.remove("show");
+}
 // ── TOAST ──
 function toast(msg, type = "") {
   const t = document.getElementById("toast");
