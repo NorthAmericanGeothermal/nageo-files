@@ -515,8 +515,8 @@ function setThreadSortOrder(v) {
 // Newest/Oldest sort preference as the thread-folder list above.
 function renderEmailFileList(files) {
   var sorted = files.slice().sort(function (a, b) {
-    var da = a.email_date || a.created_at || 0;
-    var db = b.email_date || b.created_at || 0;
+    var da = bestFileDate(a) || 0;
+    var db = bestFileDate(b) || 0;
     return threadSortOrder === "oldest" ? (new Date(da) - new Date(db)) : (new Date(db) - new Date(da));
   });
   var html = `<div class="section-label thread-list-label">
@@ -531,8 +531,8 @@ function renderEmailFileList(files) {
     var selected = selectedItems.has(key);
     var dataAttr = JSON.stringify(f).replace(/"/g, '&quot;');
     var clickHandler = selectMode ? `toggleItemSelect('file', ${dataAttr})` : `previewFile(${dataAttr})`;
-    var dateStr = formatAmericanDate(f.email_date || f.created_at);
-    var subjectText = f.subject || deriveSubjectFromFileName(f.name);
+    var dateStr = formatAmericanDate(bestFileDate(f));
+    var subjectText = bestFileSubject(f);
     var senderText = shortSenderName(f.sender);
     html += `
       <div class="thread-row${selected ? ' card-selected' : ''}" onclick="${clickHandler}">
@@ -1390,6 +1390,21 @@ function deriveDateFromFileName(name) {
   var d = new Date(m[1] + "-" + m[2] + "-" + m[3] + "T12:00:00Z"); // noon UTC avoids a timezone shifting it a day off
   return isNaN(d.getTime()) ? null : d.toISOString();
 }
+// Best available date/subject for a file, computed live at render/sort time
+// — trusts the filename (immutable, correct since the moment the email was
+// first saved) over a stored email_date/subject that might still be stale
+// or never got backfilled, so the UI shows the right thing immediately
+// rather than waiting on the next Organize pass to catch up. created_at is
+// only used as an absolute last resort (a file whose name has no date
+// prefix at all, e.g. a very old or manually-renamed file).
+function bestFileDate(f) {
+  return deriveDateFromFileName(f.name) || f.email_date || f.created_at;
+}
+function bestFileSubject(f) {
+  var fromName = deriveSubjectFromFileName(f.name);
+  if (fromName !== "(no subject)") return fromName;
+  return f.subject || fromName;
+}
 // Pulls a short plain-text preview out of an archived email's body (not its
 // header block) — the source for a thread folder's latest_snippet, so the
 // UI can show "what's this thread about" without opening it.
@@ -1413,11 +1428,11 @@ async function refreshFolderActivity(customerId, folderIds) {
   var ids = Array.from(new Set((folderIds || []).filter(Boolean)));
   if (!ids.length) return;
   const { data: rows, error } = await sb.from("nageo_files_files")
-    .select("folder_id, email_date, snippet, created_at").eq("customer_id", customerId).in("folder_id", ids);
+    .select("folder_id, email_date, snippet, created_at, name").eq("customer_id", customerId).in("folder_id", ids);
   if (error || !rows) return;
   var byFolder = {};
   rows.forEach(function (r) {
-    var d = r.email_date || r.created_at;
+    var d = bestFileDate(r);
     if (!d || !r.folder_id) return;
     var g = byFolder[r.folder_id];
     if (!g) { g = byFolder[r.folder_id] = { min: d, max: d, maxSnippet: r.snippet || "" }; return; }
@@ -1468,31 +1483,43 @@ async function organizeCustomerEmails(customerId, opts) {
     .select("*").eq("customer_id", customerId).in("folder_id", folderIds).order("created_at");
   if (filesErr || !files || !files.length) return { moved: 0, merged: 0, foldersRemoved: 0, backfilled: 0 };
 
-  // 1. Backfill subject/email_date (from the filename — always, instant,
-  // can't fail) + sender/snippet/dedup_key (archived HTML, best-effort — a
-  // failed download only leaves those three unset for now; subject and
-  // email_date are NEVER at the mercy of it).
+  // 1. Re-derive subject/email_date from the filename EVERY pass (not just
+  // when missing) + backfill sender/snippet/dedup_key from the archived
+  // HTML, best-effort. This used to only fill in a NULL subject/email_date,
+  // which meant a row that got stuck with a wrong value early on (e.g.
+  // literally "(no subject)" from before subject-derivation existed) could
+  // never self-correct — it wasn't null, just wrong, so it looked "already
+  // done" and was skipped forever. The filename is immutable and was always
+  // correct from the moment the email was first saved (see
+  // sanitizeEmailFileName), so it's trusted over a previously-stored value
+  // whenever the stored value looks like a generic fallback rather than a
+  // real one.
   var backfilled = 0;
   for (const f of files) {
-    var subject = f.subject || deriveSubjectFromFileName(f.name);
-    var emailDate = f.email_date || deriveDateFromFileName(f.name);
+    var subjectFromName = deriveSubjectFromFileName(f.name);
+    var subject = (f.subject && f.subject !== "(no subject)") ? f.subject
+      : (subjectFromName !== "(no subject)") ? subjectFromName
+      : (f.subject || subjectFromName);
+    var dateFromName = deriveDateFromFileName(f.name);
+    var emailDate = dateFromName || f.email_date;
     var dedupKey = f.dedup_key || f.rfc822_message_id || null;
     var snippet = f.snippet || null;
     var sender = f.sender || null;
     // Download is needed if we're still missing the snippet or sender (only
-    // recoverable from the archived HTML), or if we have neither an
+    // recoverable from the archived HTML), if we have neither an
     // rfc822_message_id nor a dedup_key yet (no reliable dedup fingerprint
-    // at all). NOT gated on rfc822_message_id alone — a row can already have
-    // one of those while still being missing snippet/sender.
-    var needsHtml = !f.snippet || !f.sender || (!f.rfc822_message_id && !dedupKey);
+    // at all), if the subject is still stuck on the generic fallback (the
+    // filename had none — a real one might still be recoverable from the
+    // HTML's Subject header), or if the filename had no usable date prefix.
+    var needsHtml = !f.snippet || !f.sender || (!f.rfc822_message_id && !dedupKey) || subject === "(no subject)" || !emailDate;
     if (needsHtml) {
       try {
         const { data: blob, error: dlErr } = await sb.storage.from(STORAGE_BUCKET).download(f.storage_path);
         if (!dlErr && blob) {
           const html = await blob.text();
           const parsed = parseHeaderFieldsFromHtml(html);
-          if ((!f.subject) && parsed.subject) subject = parsed.subject;
-          if (!f.email_date) emailDate = parseDateSafe(parsed.date) || emailDate;
+          if (subject === "(no subject)" && parsed.subject) subject = parsed.subject;
+          if (!emailDate) emailDate = parseDateSafe(parsed.date);
           if (!f.rfc822_message_id && !dedupKey) dedupKey = computeDedupKey(subject, parsed.from, parsed.date || emailDate);
           if (!f.snippet) snippet = derivePlainSnippet(html);
           if (!f.sender && parsed.from) sender = parsed.from;
