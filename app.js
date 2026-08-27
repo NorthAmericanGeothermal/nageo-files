@@ -127,6 +127,7 @@ function wireEvents() {
   document.getElementById("selectDeleteBtn").addEventListener("click", confirmBulkDelete);
   // Search emails
   document.getElementById("searchEmailBtn").addEventListener("click", openSearchEmailsModal);
+  document.getElementById("organizeEmailsBtn").addEventListener("click", runOrganizeForCurrentCustomer);
   document.getElementById("searchEmailsAddBtn").addEventListener("click", addSearchEmail);
   document.getElementById("searchEmailsAddInput").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); addSearchEmail(); } });
   document.getElementById("searchEmailsGoBtn").addEventListener("click", function () { startEmailSearch(); });
@@ -1160,23 +1161,201 @@ function threadFolderName(subject, firstDate) {
   }
   return "💬 " + base + dateStr;
 }
-// Deletes any locked subject-subfolder under a customer's Emails folder that
-// ended up with zero files in it — this happens after a batch of regrouping
-// (e.g. old flat-saved or old thread-id-based folders getting consolidated
-// into fewer, correctly subject-grouped folders) leaves the old container
-// behind, empty. Safe: these folders are only ever fed by this file, so an
-// empty one has nothing worth keeping.
-async function cleanupEmptyThreadFolders(customerId, emailsFolderId) {
-  const { data: subfolders, error } = await sb.from("nageo_files_folders")
-    .select("id").eq("customer_id", customerId).eq("parent_id", emailsFolderId).not("subject_key", "is", null);
-  if (error || !subfolders || !subfolders.length) return;
-  for (const f of subfolders) {
+// Pulls the From / Date / Subject values back out of an archived email's
+// stored HTML (see buildEmailArchiveHtml — these are always rendered in that
+// exact "<strong>Field:</strong> value</div>" header block). Used only by
+// organizeCustomerEmails to backfill legacy rows that were saved before the
+// subject/dedup_key columns existed, so it only ever has to run once per
+// old file, not on every organize pass.
+function parseHeaderFieldsFromHtml(html) {
+  function grab(label) {
+    var m = html.match(new RegExp("<strong>" + label + ":<\\/strong>\\s*([^<]*)<\\/div>", "i"));
+    if (!m) return "";
+    return m[1]
+      .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+      .trim();
+  }
+  var from = grab("From");
+  var date = grab("Date");
+  var subject = grab("Subject");
+  return {
+    from: from === "—" ? "" : from,
+    date: date === "—" ? "" : date,
+    subject: (subject === "(no subject)" || subject === "—") ? "" : subject,
+  };
+}
+// Pulls just the bare email address out of a "Name <addr@x.com>" or plain
+// "addr@x.com" From header, lowercased — part of the composite dedup key,
+// since the exact display-name formatting can vary slightly copy to copy but
+// the address itself never does.
+function normalizeFromAddress(from) {
+  var m = (from || "").match(/<([^>]+)>/);
+  var addr = m ? m[1] : (from || "");
+  return addr.trim().toLowerCase();
+}
+// The fallback "same physical email" fingerprint for rows that don't have an
+// rfc822_message_id (i.e. everything saved before that column existed).
+// Subject + sender address + the email's own Date header are all identical
+// on every copy of one physical email regardless of which connected account
+// received it, so this composite is a reliable stand-in.
+function computeDedupKey(subject, from, date) {
+  var subjectKey = normalizeSubject(subject);
+  var fromKey = normalizeFromAddress(from);
+  var dateKey = "";
+  if (date) {
+    var d = new Date(date);
+    if (!isNaN(d.getTime())) dateKey = d.toISOString();
+  }
+  if (!fromKey && !dateKey) return null; // not enough signal to trust this as a fingerprint
+  return subjectKey + "|" + fromKey + "|" + dateKey;
+}
+// ── ORGANIZE SAVED EMAILS ─────────────────────────────────────────────────
+// Cleans up a customer's already-saved emails WITHOUT talking to Gmail at
+// all — this is what makes it safe to run any time, and what makes it able
+// to fix emails that no longer show up in a fresh Gmail search (e.g. deleted
+// or archived on Gmail's side since they were saved): nothing here is ever
+// removed just for being "not found" — it only reads what's already in the
+// database.
+//   1. Backfills subject/dedup_key onto any legacy row that predates those
+//      columns, by downloading and parsing its archived HTML once.
+//   2. Merges true duplicates — rows sharing the same dedup_key (or the same
+//      rfc822_message_id, for newer rows) — keeping the earliest saved copy.
+//   3. Moves every remaining file into its correct subject folder, creating
+//      folders as needed.
+//   4. Deletes any now-empty locked subfolder under Emails.
+// Runs automatically after every search/sync; also runs on demand from the
+// "🗂️ Organize" button so already-saved customers don't need a fresh Gmail
+// search just to get filed correctly.
+async function organizeCustomerEmails(customerId, opts) {
+  opts = opts || {};
+  const { data: emailsFolderRows } = await sb.from("nageo_files_folders")
+    .select("*").eq("customer_id", customerId).is("parent_id", null).eq("is_system", true).limit(1);
+  const emailsFolder = emailsFolderRows && emailsFolderRows[0];
+  if (!emailsFolder) return { moved: 0, merged: 0, foldersRemoved: 0, backfilled: 0 };
+
+  const { data: subfolders } = await sb.from("nageo_files_folders")
+    .select("*").eq("customer_id", customerId).eq("parent_id", emailsFolder.id);
+  const folderIds = [emailsFolder.id].concat((subfolders || []).map(function (f) { return f.id; }));
+
+  const { data: files, error: filesErr } = await sb.from("nageo_files_files")
+    .select("*").eq("customer_id", customerId).in("folder_id", folderIds).order("created_at");
+  if (filesErr || !files || !files.length) return { moved: 0, merged: 0, foldersRemoved: 0, backfilled: 0 };
+
+  // 1. Backfill subject/dedup_key on legacy rows.
+  var backfilled = 0;
+  for (const f of files) {
+    if (f.subject && f.dedup_key) continue;
     try {
-      const { count, error: cErr } = await sb.from("nageo_files_files")
-        .select("id", { count: "exact", head: true }).eq("folder_id", f.id);
-      if (cErr) continue;
-      if (!count) await sb.from("nageo_files_folders").delete().eq("id", f.id);
-    } catch (e) { /* leave it — cosmetic cleanup only, never worth failing over */ }
+      const { data: blob, error: dlErr } = await sb.storage.from(STORAGE_BUCKET).download(f.storage_path);
+      if (dlErr || !blob) continue;
+      const html = await blob.text();
+      const parsed = parseHeaderFieldsFromHtml(html);
+      var subject = f.subject || parsed.subject || deriveSubjectFromFileName(f.name);
+      var dedupKey = f.dedup_key || f.rfc822_message_id || computeDedupKey(subject, parsed.from, parsed.date);
+      const { error: updErr } = await sb.from("nageo_files_files")
+        .update({ subject: subject, dedup_key: dedupKey }).eq("id", f.id);
+      if (!updErr) { f.subject = subject; f.dedup_key = dedupKey; backfilled++; }
+    } catch (e) { /* leave this one for next time */ }
+  }
+
+  // 2. Merge true duplicates — group by rfc822_message_id first (most
+  // reliable), then by dedup_key for whatever's left ungrouped.
+  var groups = {};
+  files.forEach(function (f) {
+    var key = f.rfc822_message_id ? ("rfc:" + f.rfc822_message_id) : (f.dedup_key ? ("dk:" + f.dedup_key) : null);
+    if (!key) return; // nothing to group this one by — leave it alone, never guess-delete
+    (groups[key] = groups[key] || []).push(f);
+  });
+  var merged = 0;
+  var removedIds = {};
+  for (const key in groups) {
+    var group = groups[key];
+    if (group.length < 2) continue;
+    group.sort(function (a, b) { return new Date(a.created_at) - new Date(b.created_at); });
+    for (var i = 1; i < group.length; i++) {
+      var dupe = group[i];
+      try {
+        await sb.storage.from(STORAGE_BUCKET).remove([dupe.storage_path]);
+        await sb.from("nageo_files_files").delete().eq("id", dupe.id);
+        removedIds[dupe.id] = true;
+        merged++;
+      } catch (e) { /* leave it rather than risk losing data */ }
+    }
+  }
+  var survivors = files.filter(function (f) { return !removedIds[f.id]; });
+
+  // 3. Regroup survivors into their correct subject folder.
+  var subjectFolderCache = {};
+  (subfolders || []).forEach(function (f) { if (f.subject_key) subjectFolderCache[f.subject_key] = f; });
+  var moved = 0;
+  for (const f of survivors) {
+    var subjectKey = normalizeSubject(f.subject);
+    var folder = subjectFolderCache[subjectKey];
+    if (!folder) {
+      try {
+        folder = await getOrCreateSubjectFolder(customerId, emailsFolder.id, { subject: f.subject, date: f.created_at }, subjectFolderCache);
+      } catch (e) { continue; }
+    }
+    if (f.folder_id !== folder.id) {
+      try {
+        await sb.from("nageo_files_files").update({ folder_id: folder.id, updated_at: new Date().toISOString() }).eq("id", f.id);
+        moved++;
+      } catch (e) { /* leave it where it is */ }
+    }
+  }
+
+  // 4. Delete any locked subfolder under Emails left with zero files —
+  // covers both old gmail_thread_id-based folders and any subject folder
+  // that lost all its files to a dedup merge above.
+  var foldersRemoved = 0;
+  const { data: freshSubfolders } = await sb.from("nageo_files_folders")
+    .select("id").eq("customer_id", customerId).eq("parent_id", emailsFolder.id);
+  for (const f of (freshSubfolders || [])) {
+    try {
+      const { count } = await sb.from("nageo_files_files").select("id", { count: "exact", head: true }).eq("folder_id", f.id);
+      if (!count) { await sb.from("nageo_files_folders").delete().eq("id", f.id); foldersRemoved++; }
+    } catch (e) { /* cosmetic only */ }
+  }
+
+  if (!opts.silent && (moved || merged || foldersRemoved) && currentCustomer && currentCustomer.id === customerId) {
+    loadFileView();
+  }
+  return { moved, merged, foldersRemoved, backfilled };
+}
+// Best-effort subject guess from a saved file's name ("2024-03-01 Some
+// Subject.html") for the rare legacy row whose archived HTML can't be
+// parsed — better than leaving it ungrouped.
+function deriveSubjectFromFileName(name) {
+  var base = (name || "").replace(/\.html$/i, "");
+  base = base.replace(/^\d{4}-\d{2}-\d{2}\s+/, "");
+  return base.trim() || "(no subject)";
+}
+// Wires the "🗂️ Organize Emails" button — runs organizeCustomerEmails for
+// whichever customer is currently open, with a toast summarizing what
+// changed. Purely a cleanup pass on already-saved data; never contacts
+// Gmail, so it's safe to click any time and never removes an email just
+// because it's no longer found in Gmail.
+async function runOrganizeForCurrentCustomer() {
+  if (!currentCustomer) return;
+  var btn = document.getElementById("organizeEmailsBtn");
+  if (btn) { btn.disabled = true; btn.textContent = "🗂️ Organizing…"; }
+  try {
+    const result = await organizeCustomerEmails(currentCustomer.id, { silent: true });
+    if (!result.moved && !result.merged && !result.foldersRemoved && !result.backfilled) {
+      toast("🗂️ Already organized — nothing to clean up.", "ok");
+    } else {
+      var parts = [];
+      if (result.moved) parts.push(result.moved + " filed into the right thread");
+      if (result.merged) parts.push(result.merged + " duplicate" + (result.merged === 1 ? "" : "s") + " merged");
+      if (result.foldersRemoved) parts.push(result.foldersRemoved + " empty folder" + (result.foldersRemoved === 1 ? "" : "s") + " removed");
+      toast("🗂️ Organized: " + parts.join(", ") + ".", "ok");
+    }
+    loadFileView();
+  } catch (e) {
+    toast("❌ Couldn't organize: " + e.message, "err");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "🗂️ Organize Emails"; }
   }
 }
 // Saves every not-yet-saved message in `results` into customerId's locked
@@ -1250,6 +1429,8 @@ async function saveEmailsToFolder(customerId, results) {
           await sb.from("nageo_files_files").update({
             folder_id: targetFolder.id,
             gmail_thread_id: r.gmail_thread_id || null,
+            subject: r.subject || null,
+            dedup_key: r.rfc822_message_id || computeDedupKey(r.subject, r.from, r.date),
             updated_at: new Date().toISOString(),
           }).eq("id", existingSameCopy.id);
           regroupedAny = true;
@@ -1276,6 +1457,8 @@ async function saveEmailsToFolder(customerId, results) {
         gmail_account: r.account || null,
         gmail_thread_id: r.gmail_thread_id || null,
         rfc822_message_id: r.rfc822_message_id || null,
+        subject: r.subject || null,
+        dedup_key: r.rfc822_message_id || computeDedupKey(r.subject, r.from, r.date),
       });
       if (insErr) {
         // 23505 = unique violation — either the same (customer_id,
@@ -1299,7 +1482,12 @@ async function saveEmailsToFolder(customerId, results) {
     }
   }
   if (savedCount || regroupedAny) {
-    try { await cleanupEmptyThreadFolders(customerId, emailsFolder.id); } catch (e) { /* cosmetic only */ }
+    // Full organize pass — catches anything this run's narrower per-message
+    // logic above missed (legacy rows with no subject/dedup_key yet, old
+    // gmail_thread_id-only folders, etc.) and cleans up empty folders. Cheap
+    // on repeat runs since backfill only touches rows still missing
+    // subject/dedup_key.
+    try { await organizeCustomerEmails(customerId, { silent: true }); } catch (e) { /* best-effort */ }
   }
   if ((savedCount || regroupedAny) && currentCustomer && currentCustomer.id === customerId) {
     loadFileView(); // live-refresh if the user happens to already be looking at this customer's files
@@ -1451,7 +1639,7 @@ async function startSweepAllCustomers() {
     }
   } catch (e) { /* proceed with HCP-on-file emails only */ }
 
-  var skipped = 0, totalSaved = 0, totalFound = 0, failed = 0;
+  var skipped = 0, totalSaved = 0, totalFound = 0, failed = 0, totalMerged = 0, totalFoldersRemoved = 0;
   var customers = allCustomers.slice();
 
   for (var i = 0; i < customers.length; i++) {
@@ -1482,7 +1670,19 @@ async function startSweepAllCustomers() {
       totalFound += results.length;
       var saved = results.length ? await saveEmailsToFolder(c.id, results) : 0;
       totalSaved += saved;
-      appendSweepLogRow(c.name, results.length ? (saved + " new · " + results.length + " found") : "no emails found", saved > 0);
+      // Always run the organize pass, even when this customer's search found
+      // nothing new — it's what catches/fixes legacy backlog (duplicates,
+      // loose or misfiled emails) sitting in already-saved data that a fresh
+      // Gmail search wouldn't surface again (e.g. since deleted on Gmail).
+      var org = { moved: 0, merged: 0, foldersRemoved: 0 };
+      try { org = await organizeCustomerEmails(c.id, { silent: true }); } catch (e2) { /* best-effort */ }
+      totalMerged += org.merged || 0;
+      totalFoldersRemoved += org.foldersRemoved || 0;
+      var resultBits = [];
+      if (results.length) resultBits.push(saved + " new · " + results.length + " found");
+      if (org.merged) resultBits.push(org.merged + " merged");
+      if (org.moved) resultBits.push(org.moved + " refiled");
+      appendSweepLogRow(c.name, resultBits.length ? resultBits.join(" · ") : "already organized", saved > 0 || org.merged > 0 || org.moved > 0);
     } catch (e) {
       failed++;
       appendSweepLogRow(c.name, "error: " + e.message, false);
@@ -1495,9 +1695,13 @@ async function startSweepAllCustomers() {
   sweepRunning = false;
   var finishedAll = !sweepCancelled;
   updateSweepSummary(summaryEl, Math.min(i, customers.length), customers.length, skipped, totalSaved, totalFound, failed, finishedAll);
+  var extraBits = [];
+  if (totalMerged) extraBits.push(totalMerged + " duplicate" + (totalMerged === 1 ? "" : "s") + " merged");
+  if (totalFoldersRemoved) extraBits.push(totalFoldersRemoved + " empty folder" + (totalFoldersRemoved === 1 ? "" : "s") + " cleaned up");
+  var extraStr = extraBits.length ? (" (" + extraBits.join(", ") + ")") : "";
   toast(finishedAll
-    ? ("✅ Sync complete — " + totalSaved + " new email" + (totalSaved === 1 ? "" : "s") + " saved across " + customers.length + " customers.")
-    : ("⏸ Sync stopped — " + totalSaved + " new email" + (totalSaved === 1 ? "" : "s") + " saved so far."), "ok");
+    ? ("✅ Sync complete — " + totalSaved + " new email" + (totalSaved === 1 ? "" : "s") + " saved across " + customers.length + " customers" + extraStr + ".")
+    : ("⏸ Sync stopped — " + totalSaved + " new email" + (totalSaved === 1 ? "" : "s") + " saved so far" + extraStr + "."), "ok");
 }
 function appendSweepLogRow(name, resultText, hasNew) {
   var logEl = document.getElementById("sweepLog");
