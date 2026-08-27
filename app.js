@@ -48,6 +48,7 @@ let selectMode = false;
 let selectedItems = new Map(); // key "folder:id" or "file:id" -> {type, data}
 let lastFolders = [];
 let lastFiles = [];
+let lastFolderCounts = {}; // folder id -> message count, for subject-thread folders' "N emails" badge
 // Drag & drop move state
 let dragData = null; // {type, id, name}
 // ── INIT ──
@@ -331,6 +332,23 @@ async function loadFileView() {
     if (filesRes.error) throw filesRes.error;
     lastFolders = foldersRes.data || [];
     lastFiles = filesRes.data || [];
+    // For any subject-thread subfolders in this view, fetch how many
+    // messages each one holds in one batched query, so the folder cards can
+    // show a "N emails" count badge instead of making the user open each one
+    // to see whether it's a single message or a 40-message conversation.
+    var subjectFolderIds = lastFolders.filter(function (f) { return f.subject_key; }).map(function (f) { return f.id; });
+    lastFolderCounts = {};
+    if (subjectFolderIds.length) {
+      try {
+        const { data: countRows, error: countErr } = await sb.from("nageo_files_files")
+          .select("folder_id").eq("customer_id", currentCustomer.id).in("folder_id", subjectFolderIds);
+        if (!countErr && countRows) {
+          countRows.forEach(function (row) {
+            lastFolderCounts[row.folder_id] = (lastFolderCounts[row.folder_id] || 0) + 1;
+          });
+        }
+      } catch (e) { /* count badge is cosmetic only — skip silently on failure */ }
+    }
     renderFileView(lastFolders, lastFiles);
   } catch (e) {
     document.getElementById("fileContent").innerHTML = `<div style="padding:2rem;text-align:center;color:var(--red);">❌ Could not load files.<br><small>${e.message}</small></div>`;
@@ -371,11 +389,13 @@ function renderFileView(folders, files) {
       // the drag/drop attrs entirely means the browser just refuses drops on
       // it by default, which is exactly the "can't be modified" behavior we want.
       const dragAttrs = (selectMode || isSys) ? '' : `draggable="true" ondragstart="handleDragStart(event,'folder',${dataAttr})" ondragend="handleDragEnd(event)" ondragover="handleDragOverFolder(event,${dataAttr})" ondragleave="handleDragLeaveCard(event)" ondrop="handleDropOnFolder(event,${dataAttr})"`;
+      const msgCount = f.subject_key ? (lastFolderCounts[f.id] || 0) : 0;
       html += `
         <div class="folder-card${selected ? ' card-selected' : ''}${isSys ? ' folder-card-system' : ''}" ${dragAttrs} onclick="${clickHandler}">
           ${(selectMode && !isSys) ? `<div class="card-checkbox${selected ? ' checked' : ''}"></div>` : ''}
           <div class="card-icon">📁</div>
           <div class="card-name">${esc(f.name)}</div>
+          ${f.subject_key ? `<div class="card-meta">${msgCount} email${msgCount === 1 ? '' : 's'}</div>` : ''}
           ${isSys ? `<span class="card-system-badge" title="Auto-synced from Search Emails — protected, can't be renamed, moved, or deleted">🔒</span>` : (selectMode ? '' : `<button class="card-menu" onclick="event.stopPropagation();showCtx(event,'folder',${dataAttr})">⋯</button>`)}
         </div>
       `;
@@ -431,13 +451,13 @@ function updateSystemFolderUI() {
   });
 }
 // ── AI THREAD OVERVIEW — only shown when currentFolderRow is one of the
-// auto-created thread subfolders (has gmail_thread_id set). On-demand only:
+// auto-created subject subfolders (has subject_key set). On-demand only:
 // nothing is summarized until someone actually clicks the button, and the
 // result is saved on the folder row and reused until Regenerate is clicked. ──
 function renderThreadOverviewBar() {
   var el = document.getElementById("threadOverviewBar");
   if (!el) return;
-  if (!currentFolderRow || !currentFolderRow.gmail_thread_id) {
+  if (!currentFolderRow || !currentFolderRow.subject_key) {
     el.style.display = "none";
     el.innerHTML = "";
     return;
@@ -1073,38 +1093,61 @@ function buildEmailArchiveHtml(r) {
     + '<style>*{box-sizing:border-box;}body{margin:0;font-family:-apple-system,sans-serif;background:#fff;}.email-body{padding:16px;font-size:13px;line-height:1.55;color:#1a1a1a;word-wrap:break-word;overflow-wrap:break-word;}img{max-width:100%;height:auto;}a{color:#2e73d4;}table{max-width:100%;}</style>'
     + '</head><body>' + headerHtml + '<div class="email-body">' + bodyContent + '</div></body></html>';
 }
-// Finds (or creates) the locked thread subfolder a message belongs in, keyed
-// by account + Gmail thread id — not by name, since lots of threads share
-// the same subject ("Update", "North American Geothermal", …) and thread id
-// is what actually tells two messages apart. `cache` is a plain object the
-// caller passes in and reuses across one saveEmailsToFolder call, so a
-// 40-message thread doesn't do 40 redundant lookups.
-async function getOrCreateThreadFolder(customerId, emailsFolderId, r, cache) {
-  var key = r.account + ":" + r.gmail_thread_id;
-  if (cache[key]) return cache[key];
+// Normalizes a subject into the key subfolders are grouped by — strips any
+// number of leading Re:/Fwd:/Fw:/Aw: prefixes (any casing, ":" or "-" after
+// them), collapses whitespace, and lowercases. Deliberately NOT based on
+// Gmail's own thread id: Gmail splits what a person would call "the same
+// conversation" into multiple separate thread ids far too often (gaps in
+// time, a reply missing proper References headers, etc.), so grouping by
+// the actual subject text is what makes "North American GeoThermal - Quote"
+// and "Re: North American GeoThermal - Quote" and "Re: Re: North American
+// GeoThermal - Quote" all land in one folder together.
+function normalizeSubject(subject) {
+  var s = (subject || "").trim();
+  var prefixRe = /^(re|fw|fwd|aw)[:\-]\s*/i;
+  var changed = true;
+  while (changed) {
+    var next = s.replace(prefixRe, "");
+    changed = next !== s;
+    s = next.trim();
+  }
+  s = s.replace(/\s+/g, " ").trim().toLowerCase();
+  return s || "(no subject)";
+}
+// Finds (or creates) the locked subfolder a message belongs in, keyed by its
+// normalized subject (see normalizeSubject) — not by Gmail's thread id or
+// which connected account found it, so replies scattered across separate
+// Gmail threads (or cc'd to a different one of your connected accounts)
+// still land in the same one folder. `cache` is a plain object the caller
+// passes in and reuses across one saveEmailsToFolder call, so a 40-message
+// thread doesn't do 40 redundant lookups.
+async function getOrCreateSubjectFolder(customerId, emailsFolderId, r, cache) {
+  var subjectKey = normalizeSubject(r.subject);
+  if (cache[subjectKey]) return cache[subjectKey];
   const { data: existing, error: findErr } = await sb.from("nageo_files_folders")
-    .select("*").eq("customer_id", customerId).eq("gmail_account", r.account).eq("gmail_thread_id", r.gmail_thread_id).limit(1);
+    .select("*").eq("customer_id", customerId).eq("subject_key", subjectKey).limit(1);
   if (findErr) throw findErr;
-  if (existing && existing.length) { cache[key] = existing[0]; return existing[0]; }
+  if (existing && existing.length) { cache[subjectKey] = existing[0]; return existing[0]; }
   const { data, error } = await sb.from("nageo_files_folders").insert({
     customer_id: customerId,
     parent_id: emailsFolderId,
     name: threadFolderName(r.subject, r.date),
     is_system: true,
-    gmail_thread_id: r.gmail_thread_id,
-    gmail_account: r.account,
+    subject_key: subjectKey,
+    gmail_thread_id: r.gmail_thread_id || null, // informational only — whichever message created this folder
+    gmail_account: r.account || null,
   }).select().single();
   if (error) {
     if (error.code === "23505") {
       // Unique-violation race — another concurrent save just created this
-      // exact thread folder a moment ago. Fetch it instead of failing.
+      // exact subject folder a moment ago. Fetch it instead of failing.
       const { data: raced } = await sb.from("nageo_files_folders")
-        .select("*").eq("customer_id", customerId).eq("gmail_account", r.account).eq("gmail_thread_id", r.gmail_thread_id).limit(1).single();
-      if (raced) { cache[key] = raced; return raced; }
+        .select("*").eq("customer_id", customerId).eq("subject_key", subjectKey).limit(1).single();
+      if (raced) { cache[subjectKey] = raced; return raced; }
     }
     throw error;
   }
-  cache[key] = data;
+  cache[subjectKey] = data;
   return data;
 }
 function threadFolderName(subject, firstDate) {
@@ -1117,15 +1160,35 @@ function threadFolderName(subject, firstDate) {
   }
   return "💬 " + base + dateStr;
 }
+// Deletes any locked subject-subfolder under a customer's Emails folder that
+// ended up with zero files in it — this happens after a batch of regrouping
+// (e.g. old flat-saved or old thread-id-based folders getting consolidated
+// into fewer, correctly subject-grouped folders) leaves the old container
+// behind, empty. Safe: these folders are only ever fed by this file, so an
+// empty one has nothing worth keeping.
+async function cleanupEmptyThreadFolders(customerId, emailsFolderId) {
+  const { data: subfolders, error } = await sb.from("nageo_files_folders")
+    .select("id").eq("customer_id", customerId).eq("parent_id", emailsFolderId).not("subject_key", "is", null);
+  if (error || !subfolders || !subfolders.length) return;
+  for (const f of subfolders) {
+    try {
+      const { count, error: cErr } = await sb.from("nageo_files_files")
+        .select("id", { count: "exact", head: true }).eq("folder_id", f.id);
+      if (cErr) continue;
+      if (!count) await sb.from("nageo_files_folders").delete().eq("id", f.id);
+    } catch (e) { /* leave it — cosmetic cleanup only, never worth failing over */ }
+  }
+}
 // Saves every not-yet-saved message in `results` into customerId's locked
-// Emails folder, grouped into one locked subfolder per email thread (see
-// getOrCreateThreadFolder). Returns how many were newly saved. Safe to call
+// Emails folder, grouped into one locked subfolder per subject (see
+// getOrCreateSubjectFolder). Returns how many were newly saved. Safe to call
 // repeatedly with overlapping/duplicate result sets — that's the whole
 // point, since a re-run of Search Emails will re-find messages already
-// archived from a previous search. It also self-heals: any message saved
-// before thread grouping existed (sitting flat in the Emails folder with no
-// thread id) gets backfilled and moved into its correct thread subfolder the
-// next time it turns up in a search.
+// archived from a previous search. It also self-heals: any message sitting
+// in the wrong folder (saved flat before grouping existed, or grouped under
+// an old Gmail-thread-id-based folder) gets moved into its correct subject
+// folder the next time it turns up in a search, and any subfolder left empty
+// by that gets cleaned up automatically.
 //
 // TWO layers of de-dup, because one message can repeat two different ways:
 //   1. gmail_message_id — the exact same result turning up again from the
@@ -1134,10 +1197,8 @@ function threadFolderName(subject, firstDate) {
 //      sending server and identical on every copy of an email everywhere it
 //      lands. This is what catches the SAME physical email arriving via a
 //      DIFFERENT connected account (cc'd, forwarded between reps, etc.) —
-//      Gmail assigns that copy its own distinct gmail_message_id AND its own
-//      gmail_thread_id, so without this check it would save as a second
-//      file in a second, disconnected thread folder instead of being
-//      recognized as the same email.
+//      Gmail assigns that copy its own distinct gmail_message_id, so without
+//      this check it would save as a second file.
 async function saveEmailsToFolder(customerId, results) {
   if (!results || !results.length) return 0;
   const emailsFolder = await getOrCreateEmailsFolder(customerId);
@@ -1157,8 +1218,9 @@ async function saveEmailsToFolder(customerId, results) {
       if (row.rfc822_message_id) existingByRfcId[row.rfc822_message_id] = row;
     });
   }
-  var threadFolderCache = {};
+  var subjectFolderCache = {};
   let savedCount = 0;
+  let regroupedAny = false;
   for (const r of results) {
     if (!r.gmail_message_id) continue;
     // Exact same account+message re-turning-up — safe to backfill/regroup,
@@ -1172,18 +1234,17 @@ async function saveEmailsToFolder(customerId, results) {
     if (existingCrossAccountDup) continue;
 
     var targetFolder = emailsFolder;
-    if (r.gmail_thread_id && r.account) {
-      try {
-        targetFolder = await getOrCreateThreadFolder(customerId, emailsFolder.id, r, threadFolderCache);
-      } catch (e) {
-        console.warn("Could not group into a thread folder, saving flat instead:", e);
-        targetFolder = emailsFolder;
-      }
+    try {
+      targetFolder = await getOrCreateSubjectFolder(customerId, emailsFolder.id, r, subjectFolderCache);
+    } catch (e) {
+      console.warn("Could not group into a subject folder, saving flat instead:", e);
+      targetFolder = emailsFolder;
     }
     if (existingSameCopy) {
       // Already saved — if it's sitting somewhere other than its correct
-      // thread folder (e.g. saved flat before threading existed), move it
-      // and backfill its thread id now that we know it.
+      // subject folder (e.g. saved flat before grouping existed, or grouped
+      // under an old thread-id-based folder), move it and backfill its
+      // thread id now that we know it.
       if (existingSameCopy.folder_id !== targetFolder.id) {
         try {
           await sb.from("nageo_files_files").update({
@@ -1191,6 +1252,7 @@ async function saveEmailsToFolder(customerId, results) {
             gmail_thread_id: r.gmail_thread_id || null,
             updated_at: new Date().toISOString(),
           }).eq("id", existingSameCopy.id);
+          regroupedAny = true;
         } catch (e) { console.warn("Failed to regroup existing saved email:", r.subject, e); }
       }
       continue;
@@ -1236,7 +1298,10 @@ async function saveEmailsToFolder(customerId, results) {
       console.warn("Failed to save email to Emails folder:", r.subject, e);
     }
   }
-  if (savedCount && currentCustomer && currentCustomer.id === customerId) {
+  if (savedCount || regroupedAny) {
+    try { await cleanupEmptyThreadFolders(customerId, emailsFolder.id); } catch (e) { /* cosmetic only */ }
+  }
+  if ((savedCount || regroupedAny) && currentCustomer && currentCustomer.id === customerId) {
     loadFileView(); // live-refresh if the user happens to already be looking at this customer's files
   }
   return savedCount;
