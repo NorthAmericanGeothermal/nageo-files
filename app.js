@@ -5,6 +5,7 @@ const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const HCP_CUSTOMERS_URL = SUPABASE_URL + "/functions/v1/nageo-files-hcp-customers";
 const SEARCH_EMAILS_URL = SUPABASE_URL + "/functions/v1/nageo-files-search-emails";
 const THREAD_SUMMARY_URL = SUPABASE_URL + "/functions/v1/nageo-files-thread-summary";
+const SMART_MERGE_URL = SUPABASE_URL + "/functions/v1/nageo-files-smart-merge";
 const STORAGE_BUCKET = "nageo-files-documents";
 const REG_KEY = "nageo_files_reg";
 // Same shared Gmail OAuth app + redirect used by NAGeo GRECs' "Connect Gmail"
@@ -49,6 +50,7 @@ let selectedItems = new Map(); // key "folder:id" or "file:id" -> {type, data}
 let lastFolders = [];
 let lastFiles = [];
 let lastFolderCounts = {}; // folder id -> message count, for subject-thread folders' "N emails" badge
+let threadSortOrder = localStorage.getItem("nageo_files_thread_sort") || "newest"; // "newest" | "oldest", for the Emails overview page
 // Drag & drop move state
 let dragData = null; // {type, id, name}
 // ── INIT ──
@@ -128,6 +130,7 @@ function wireEvents() {
   // Search emails
   document.getElementById("searchEmailBtn").addEventListener("click", openSearchEmailsModal);
   document.getElementById("organizeEmailsBtn").addEventListener("click", runOrganizeForCurrentCustomer);
+  document.getElementById("smartMergeBtn").addEventListener("click", openSmartMergeModal);
   document.getElementById("searchEmailsAddBtn").addEventListener("click", addSearchEmail);
   document.getElementById("searchEmailsAddInput").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); addSearchEmail(); } });
   document.getElementById("searchEmailsGoBtn").addEventListener("click", function () { startEmailSearch(); });
@@ -377,31 +380,34 @@ function renderFileView(folders, files) {
     return;
   }
   if (folders.length) {
-    html += `<div class="section-label">📁 Folders</div><div class="file-grid">`;
-    folders.forEach(f => {
-      const key = "folder:" + f.id;
-      const selected = selectedItems.has(key);
-      const dataAttr = JSON.stringify(f).replace(/"/g,'&quot;');
-      const isSys = !!f.is_system;
-      const clickHandler = (selectMode && !isSys)
-        ? `toggleItemSelect('folder', ${dataAttr})`
-        : `openFolder(${dataAttr})`;
-      // System folder: not draggable, and not a drop target either — omitting
-      // the drag/drop attrs entirely means the browser just refuses drops on
-      // it by default, which is exactly the "can't be modified" behavior we want.
-      const dragAttrs = (selectMode || isSys) ? '' : `draggable="true" ondragstart="handleDragStart(event,'folder',${dataAttr})" ondragend="handleDragEnd(event)" ondragover="handleDragOverFolder(event,${dataAttr})" ondragleave="handleDragLeaveCard(event)" ondrop="handleDropOnFolder(event,${dataAttr})"`;
-      const msgCount = f.subject_key ? (lastFolderCounts[f.id] || 0) : 0;
-      html += `
-        <div class="folder-card${selected ? ' card-selected' : ''}${isSys ? ' folder-card-system' : ''}" ${dragAttrs} onclick="${clickHandler}">
-          ${(selectMode && !isSys) ? `<div class="card-checkbox${selected ? ' checked' : ''}"></div>` : ''}
-          <div class="card-icon">📁</div>
-          <div class="card-name">${esc(f.name)}</div>
-          ${f.subject_key ? `<div class="card-meta">${msgCount} email${msgCount === 1 ? '' : 's'}</div>` : ''}
-          ${isSys ? `<span class="card-system-badge" title="Auto-synced from Search Emails — protected, can't be renamed, moved, or deleted">🔒</span>` : (selectMode ? '' : `<button class="card-menu" onclick="event.stopPropagation();showCtx(event,'folder',${dataAttr})">⋯</button>`)}
-        </div>
-      `;
-    });
-    html += `</div>`;
+    const isThreadList = folders.some(f => f.subject_key);
+    if (isThreadList) {
+      html += renderThreadFolderList(folders);
+    } else {
+      html += `<div class="section-label">📁 Folders</div><div class="file-grid">`;
+      folders.forEach(f => {
+        const key = "folder:" + f.id;
+        const selected = selectedItems.has(key);
+        const dataAttr = JSON.stringify(f).replace(/"/g,'&quot;');
+        const isSys = !!f.is_system;
+        const clickHandler = (selectMode && !isSys)
+          ? `toggleItemSelect('folder', ${dataAttr})`
+          : `openFolder(${dataAttr})`;
+        // System folder: not draggable, and not a drop target either — omitting
+        // the drag/drop attrs entirely means the browser just refuses drops on
+        // it by default, which is exactly the "can't be modified" behavior we want.
+        const dragAttrs = (selectMode || isSys) ? '' : `draggable="true" ondragstart="handleDragStart(event,'folder',${dataAttr})" ondragend="handleDragEnd(event)" ondragover="handleDragOverFolder(event,${dataAttr})" ondragleave="handleDragLeaveCard(event)" ondrop="handleDropOnFolder(event,${dataAttr})"`;
+        html += `
+          <div class="folder-card${selected ? ' card-selected' : ''}${isSys ? ' folder-card-system' : ''}" ${dragAttrs} onclick="${clickHandler}">
+            ${(selectMode && !isSys) ? `<div class="card-checkbox${selected ? ' checked' : ''}"></div>` : ''}
+            <div class="card-icon">📁</div>
+            <div class="card-name">${esc(f.name)}</div>
+            ${isSys ? `<span class="card-system-badge" title="Auto-synced from Search Emails — protected, can't be renamed, moved, or deleted">🔒</span>` : (selectMode ? '' : `<button class="card-menu" onclick="event.stopPropagation();showCtx(event,'folder',${dataAttr})">⋯</button>`)}
+          </div>
+        `;
+      });
+      html += `</div>`;
+    }
   }
   if (files.length) {
     html += `<div class="section-label">📄 Files</div><div class="file-grid">`;
@@ -428,6 +434,66 @@ function renderFileView(folders, files) {
   }
   el.innerHTML = html;
   rewireDrop();
+}
+// Renders the thread-folder list for a customer's 📧 Emails overview page as
+// horizontal rows rather than the small square grid regular folders use —
+// a thread needs room for its subject, a snippet of its most recent
+// message, its message count, and a "last active" date to be useful at a
+// glance, none of which fit a square tile well.
+function renderThreadFolderList(folders) {
+  var sorted = folders.slice().sort(function (a, b) {
+    var da = a.last_message_at || a.first_message_at || a.created_at || 0;
+    var db = b.last_message_at || b.first_message_at || b.created_at || 0;
+    return threadSortOrder === "oldest" ? (new Date(da) - new Date(db)) : (new Date(db) - new Date(da));
+  });
+  var html = `<div class="section-label thread-list-label">
+    <span>💬 Email Threads</span>
+    <select class="thread-sort-select" onchange="setThreadSortOrder(this.value)">
+      <option value="newest"${threadSortOrder === "newest" ? " selected" : ""}>Newest first</option>
+      <option value="oldest"${threadSortOrder === "oldest" ? " selected" : ""}>Oldest first</option>
+    </select>
+  </div><div class="thread-list">`;
+  sorted.forEach(function (f) {
+    var isSys = !!f.is_system;
+    var dataAttr = JSON.stringify(f).replace(/"/g, '&quot;');
+    var key = "folder:" + f.id;
+    var selected = selectedItems.has(key);
+    var clickHandler = (selectMode && !isSys) ? `toggleItemSelect('folder', ${dataAttr})` : `openFolder(${dataAttr})`;
+    var msgCount = lastFolderCounts[f.id] || 0;
+    var dateStr = formatThreadDate(f.last_message_at || f.first_message_at);
+    var subjectText = (f.name || "").replace(/^💬\s*/, "");
+    html += `
+      <div class="thread-row${selected ? ' card-selected' : ''}" onclick="${clickHandler}">
+        ${(selectMode && !isSys) ? `<div class="card-checkbox${selected ? ' checked' : ''}"></div>` : `<div class="thread-row-icon">💬</div>`}
+        <div class="thread-row-main">
+          <div class="thread-row-top">
+            <span class="thread-row-subject">${esc(subjectText)}</span>
+            ${dateStr ? `<span class="thread-row-date">${esc(dateStr)}</span>` : ''}
+          </div>
+          ${f.latest_snippet ? `<div class="thread-row-snippet">${esc(f.latest_snippet)}</div>` : ''}
+        </div>
+        <div class="thread-row-right">
+          <span class="thread-row-count">${msgCount} email${msgCount === 1 ? '' : 's'}</span>
+          ${isSys ? `<span class="card-system-badge" title="Auto-synced from Search Emails — protected, can't be renamed, moved, or deleted">🔒</span>` : ''}
+        </div>
+      </div>
+    `;
+  });
+  html += `</div>`;
+  return html;
+}
+function formatThreadDate(v) {
+  if (!v) return "";
+  var d = new Date(v);
+  if (isNaN(d.getTime())) return "";
+  var now = new Date();
+  var sameYear = d.getFullYear() === now.getFullYear();
+  return d.toLocaleDateString(undefined, sameYear ? { month: "short", day: "numeric" } : { month: "short", day: "numeric", year: "numeric" });
+}
+function setThreadSortOrder(v) {
+  threadSortOrder = (v === "oldest") ? "oldest" : "newest";
+  localStorage.setItem("nageo_files_thread_sort", threadSortOrder);
+  renderFileView(lastFolders, lastFiles);
 }
 function rewireDrop() {
   const fc = document.getElementById("fileContent");
@@ -464,21 +530,31 @@ function renderThreadOverviewBar() {
     return;
   }
   el.style.display = "block";
+  var backBtn = '<button class="back-to-threads-btn" id="backToThreadsBtn">← Back to Email Threads</button>';
   if (currentFolderRow.ai_overview) {
     var when = currentFolderRow.ai_overview_generated_at ? new Date(currentFolderRow.ai_overview_generated_at).toLocaleString() : "";
-    el.innerHTML = '<div class="ai-overview-card">'
+    el.innerHTML = backBtn + '<div class="ai-overview-card">'
       + '<div class="ai-overview-hdr"><span>✨ AI Overview</span><span class="ai-overview-when">' + esc(when) + '</span></div>'
       + '<div class="ai-overview-text">' + esc(currentFolderRow.ai_overview).replace(/\n/g, '<br>') + '</div>'
       + '<button class="ai-overview-btn" id="aiOverviewBtn">🔄 Regenerate</button>'
       + '</div>';
   } else {
-    el.innerHTML = '<div class="ai-overview-card ai-overview-empty">'
+    el.innerHTML = backBtn + '<div class="ai-overview-card ai-overview-empty">'
       + '<div class="ai-overview-empty-text">Get a quick AI-written summary of this whole email thread — generated once, on demand, and reused until you click Regenerate.</div>'
       + '<button class="ai-overview-btn" id="aiOverviewBtn">✨ Get AI Overview</button>'
       + '</div>';
   }
   var btn = document.getElementById("aiOverviewBtn");
   if (btn) btn.addEventListener("click", requestAiOverview);
+  var back = document.getElementById("backToThreadsBtn");
+  if (back) back.addEventListener("click", goBackToThreads);
+}
+// Jumps back up to the parent folder — for a thread subfolder, that's
+// always the customer's 📧 Emails overview page. Reuses the same breadcrumb
+// navigation navTo() already does, just aimed one level up.
+function goBackToThreads() {
+  if (breadcrumbs.length) navTo(breadcrumbs.length - 1);
+  else navTo(-1);
 }
 async function requestAiOverview() {
   if (!currentFolderRow || !currentCustomer) return;
@@ -1129,14 +1205,18 @@ async function getOrCreateSubjectFolder(customerId, emailsFolderId, r, cache) {
     .select("*").eq("customer_id", customerId).eq("subject_key", subjectKey).limit(1);
   if (findErr) throw findErr;
   if (existing && existing.length) { cache[subjectKey] = existing[0]; return existing[0]; }
+  var emailDate = parseDateSafe(r.date);
   const { data, error } = await sb.from("nageo_files_folders").insert({
     customer_id: customerId,
     parent_id: emailsFolderId,
-    name: threadFolderName(r.subject, r.date),
+    name: threadFolderName(r.subject),
     is_system: true,
     subject_key: subjectKey,
     gmail_thread_id: r.gmail_thread_id || null, // informational only — whichever message created this folder
     gmail_account: r.account || null,
+    first_message_at: emailDate,
+    last_message_at: emailDate,
+    latest_snippet: r.snippet || null,
   }).select().single();
   if (error) {
     if (error.code === "23505") {
@@ -1151,15 +1231,18 @@ async function getOrCreateSubjectFolder(customerId, emailsFolderId, r, cache) {
   cache[subjectKey] = data;
   return data;
 }
-function threadFolderName(subject, firstDate) {
+// The date shown on a thread's card comes from last_message_at (kept fresh
+// by refreshFolderActivity), not a date baked into the folder name — so the
+// name is just the subject, nothing else.
+function threadFolderName(subject) {
   var base = (subject && subject.trim()) ? subject.trim() : "(no subject)";
   base = base.replace(/[\\/:*?"<>|]/g, "-").slice(0, 70).trim() || "email";
-  var dateStr = "";
-  if (firstDate) {
-    var d = new Date(firstDate);
-    if (!isNaN(d.getTime())) dateStr = " (" + d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) + ")";
-  }
-  return "💬 " + base + dateStr;
+  return "💬 " + base;
+}
+function parseDateSafe(v) {
+  if (!v) return null;
+  var d = new Date(v);
+  return isNaN(d.getTime()) ? null : d.toISOString();
 }
 // Pulls the From / Date / Subject values back out of an archived email's
 // stored HTML (see buildEmailArchiveHtml — these are always rendered in that
@@ -1210,6 +1293,68 @@ function computeDedupKey(subject, from, date) {
   if (!fromKey && !dateKey) return null; // not enough signal to trust this as a fingerprint
   return subjectKey + "|" + fromKey + "|" + dateKey;
 }
+// Best-effort subject/date guess from a saved file's name ("2024-03-01 Some
+// Subject.html") — the filename always has this baked in from the moment
+// the file was first saved (see sanitizeEmailFileName), with zero risk of
+// failure, unlike downloading and parsing the archived HTML. This is the
+// PRIMARY source organizeCustomerEmails uses to backfill a legacy row's
+// subject — a failed/slow storage download can no longer cause a real,
+// subject-bearing email to get dumped into a bogus "(no subject)" bucket.
+function deriveSubjectFromFileName(name) {
+  var base = (name || "").replace(/\.html$/i, "");
+  base = base.replace(/^\d{4}-\d{2}-\d{2}\s+/, "");
+  return base.trim() || "(no subject)";
+}
+function deriveDateFromFileName(name) {
+  var m = (name || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  var d = new Date(m[1] + "-" + m[2] + "-" + m[3] + "T12:00:00Z"); // noon UTC avoids a timezone shifting it a day off
+  return isNaN(d.getTime()) ? null : d.toISOString();
+}
+// Pulls a short plain-text preview out of an archived email's body (not its
+// header block) — the source for a thread folder's latest_snippet, so the
+// UI can show "what's this thread about" without opening it.
+function derivePlainSnippet(html) {
+  var m = (html || "").match(/<div class="email-body">([\s\S]*?)<\/div>\s*<\/body>/i);
+  var raw = m ? m[1] : (html || "");
+  var text = raw
+    .replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<br\s*\/?>/gi, " ").replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/\s+/g, " ").trim();
+  return text.slice(0, 220);
+}
+// Recomputes first_message_at / last_message_at / latest_snippet on each
+// given folder from its member files' email_date — so a thread's card
+// always shows an accurate "most recent activity" date (not a frozen
+// creation-time date) and a preview of whichever message is newest. Call
+// after any batch of saves/moves/merges.
+async function refreshFolderActivity(customerId, folderIds) {
+  var ids = Array.from(new Set((folderIds || []).filter(Boolean)));
+  if (!ids.length) return;
+  const { data: rows, error } = await sb.from("nageo_files_files")
+    .select("folder_id, email_date, snippet, created_at").eq("customer_id", customerId).in("folder_id", ids);
+  if (error || !rows) return;
+  var byFolder = {};
+  rows.forEach(function (r) {
+    var d = r.email_date || r.created_at;
+    if (!d || !r.folder_id) return;
+    var g = byFolder[r.folder_id];
+    if (!g) { g = byFolder[r.folder_id] = { min: d, max: d, maxSnippet: r.snippet || "" }; return; }
+    if (new Date(d) < new Date(g.min)) g.min = d;
+    if (new Date(d) >= new Date(g.max)) { g.max = d; g.maxSnippet = r.snippet || g.maxSnippet; }
+  });
+  await Promise.all(ids.map(async function (id) {
+    var g = byFolder[id];
+    if (!g) return;
+    try {
+      await sb.from("nageo_files_folders")
+        .update({ first_message_at: g.min, last_message_at: g.max, latest_snippet: g.maxSnippet || null })
+        .eq("id", id);
+    } catch (e) { /* cosmetic only */ }
+  }));
+}
 // ── ORGANIZE SAVED EMAILS ─────────────────────────────────────────────────
 // Cleans up a customer's already-saved emails WITHOUT talking to Gmail at
 // all — this is what makes it safe to run any time, and what makes it able
@@ -1217,13 +1362,15 @@ function computeDedupKey(subject, from, date) {
 // or archived on Gmail's side since they were saved): nothing here is ever
 // removed just for being "not found" — it only reads what's already in the
 // database.
-//   1. Backfills subject/dedup_key onto any legacy row that predates those
-//      columns, by downloading and parsing its archived HTML once.
+//   1. Backfills subject (always from the filename — instant, can't fail)
+//      plus email_date/snippet/dedup_key (from the archived HTML, best
+//      effort) onto any legacy row that predates those columns.
 //   2. Merges true duplicates — rows sharing the same dedup_key (or the same
 //      rfc822_message_id, for newer rows) — keeping the earliest saved copy.
 //   3. Moves every remaining file into its correct subject folder, creating
 //      folders as needed.
-//   4. Deletes any now-empty locked subfolder under Emails.
+//   4. Refreshes last_message_at/latest_snippet on every touched folder.
+//   5. Deletes any now-empty locked subfolder under Emails.
 // Runs automatically after every search/sync; also runs on demand from the
 // "🗂️ Organize" button so already-saved customers don't need a fresh Gmail
 // search just to get filed correctly.
@@ -1242,21 +1389,40 @@ async function organizeCustomerEmails(customerId, opts) {
     .select("*").eq("customer_id", customerId).in("folder_id", folderIds).order("created_at");
   if (filesErr || !files || !files.length) return { moved: 0, merged: 0, foldersRemoved: 0, backfilled: 0 };
 
-  // 1. Backfill subject/dedup_key on legacy rows.
+  // 1. Backfill subject (filename, always) + email_date/snippet/dedup_key
+  // (archived HTML, best-effort — a failed download just means those three
+  // stay unset for now, subject is NEVER at the mercy of it).
   var backfilled = 0;
   for (const f of files) {
-    if (f.subject && f.dedup_key) continue;
-    try {
-      const { data: blob, error: dlErr } = await sb.storage.from(STORAGE_BUCKET).download(f.storage_path);
-      if (dlErr || !blob) continue;
-      const html = await blob.text();
-      const parsed = parseHeaderFieldsFromHtml(html);
-      var subject = f.subject || parsed.subject || deriveSubjectFromFileName(f.name);
-      var dedupKey = f.dedup_key || f.rfc822_message_id || computeDedupKey(subject, parsed.from, parsed.date);
-      const { error: updErr } = await sb.from("nageo_files_files")
-        .update({ subject: subject, dedup_key: dedupKey }).eq("id", f.id);
-      if (!updErr) { f.subject = subject; f.dedup_key = dedupKey; backfilled++; }
-    } catch (e) { /* leave this one for next time */ }
+    var subject = f.subject || deriveSubjectFromFileName(f.name);
+    var emailDate = f.email_date || deriveDateFromFileName(f.name);
+    var dedupKey = f.dedup_key || f.rfc822_message_id || null;
+    var snippet = f.snippet || null;
+    var needsHtml = !f.rfc822_message_id && (!dedupKey || !f.email_date || !f.snippet);
+    if (needsHtml) {
+      try {
+        const { data: blob, error: dlErr } = await sb.storage.from(STORAGE_BUCKET).download(f.storage_path);
+        if (!dlErr && blob) {
+          const html = await blob.text();
+          const parsed = parseHeaderFieldsFromHtml(html);
+          if ((!f.subject) && parsed.subject) subject = parsed.subject;
+          if (!f.email_date) emailDate = parseDateSafe(parsed.date) || emailDate;
+          if (!dedupKey) dedupKey = computeDedupKey(subject, parsed.from, parsed.date || emailDate);
+          if (!f.snippet) snippet = derivePlainSnippet(html);
+        }
+      } catch (e) { /* proceed with whatever we already have — never blocks subject */ }
+    }
+    var patch = {};
+    if (subject && subject !== f.subject) patch.subject = subject;
+    if (dedupKey && dedupKey !== f.dedup_key) patch.dedup_key = dedupKey;
+    if (emailDate && emailDate !== f.email_date) patch.email_date = emailDate;
+    if (snippet && snippet !== f.snippet) patch.snippet = snippet;
+    if (Object.keys(patch).length) {
+      try {
+        const { error: updErr } = await sb.from("nageo_files_files").update(patch).eq("id", f.id);
+        if (!updErr) { Object.assign(f, patch); backfilled++; }
+      } catch (e) { /* leave for next time */ }
+    }
   }
 
   // 2. Merge true duplicates — group by rfc822_message_id first (most
@@ -1289,14 +1455,16 @@ async function organizeCustomerEmails(customerId, opts) {
   var subjectFolderCache = {};
   (subfolders || []).forEach(function (f) { if (f.subject_key) subjectFolderCache[f.subject_key] = f; });
   var moved = 0;
+  var touchedFolderIds = {};
   for (const f of survivors) {
     var subjectKey = normalizeSubject(f.subject);
     var folder = subjectFolderCache[subjectKey];
     if (!folder) {
       try {
-        folder = await getOrCreateSubjectFolder(customerId, emailsFolder.id, { subject: f.subject, date: f.created_at }, subjectFolderCache);
+        folder = await getOrCreateSubjectFolder(customerId, emailsFolder.id, { subject: f.subject, date: f.email_date || f.created_at, snippet: f.snippet }, subjectFolderCache);
       } catch (e) { continue; }
     }
+    touchedFolderIds[folder.id] = true;
     if (f.folder_id !== folder.id) {
       try {
         await sb.from("nageo_files_files").update({ folder_id: folder.id, updated_at: new Date().toISOString() }).eq("id", f.id);
@@ -1305,7 +1473,12 @@ async function organizeCustomerEmails(customerId, opts) {
     }
   }
 
-  // 4. Delete any locked subfolder under Emails left with zero files —
+  // 4. Bring last_message_at/latest_snippet up to date on every folder this
+  // pass touched (new ones already have it right from creation, but a
+  // folder that gained/lost files needs its span recomputed).
+  try { await refreshFolderActivity(customerId, Object.keys(touchedFolderIds)); } catch (e) { /* cosmetic only */ }
+
+  // 5. Delete any locked subfolder under Emails left with zero files —
   // covers both old gmail_thread_id-based folders and any subject folder
   // that lost all its files to a dedup merge above.
   var foldersRemoved = 0;
@@ -1322,14 +1495,6 @@ async function organizeCustomerEmails(customerId, opts) {
     loadFileView();
   }
   return { moved, merged, foldersRemoved, backfilled };
-}
-// Best-effort subject guess from a saved file's name ("2024-03-01 Some
-// Subject.html") for the rare legacy row whose archived HTML can't be
-// parsed — better than leaving it ungrouped.
-function deriveSubjectFromFileName(name) {
-  var base = (name || "").replace(/\.html$/i, "");
-  base = base.replace(/^\d{4}-\d{2}-\d{2}\s+/, "");
-  return base.trim() || "(no subject)";
 }
 // Wires the "🗂️ Organize Emails" button — runs organizeCustomerEmails for
 // whichever customer is currently open, with a toast summarizing what
@@ -1356,6 +1521,98 @@ async function runOrganizeForCurrentCustomer() {
     toast("❌ Couldn't organize: " + e.message, "err");
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = "🗂️ Organize Emails"; }
+  }
+}
+// ── AI SMART MERGE ─────────────────────────────────────────────────────
+// Plain subject-text matching (normalizeSubject) can't catch every case —
+// a reply whose subject drifted a little still lands in its own separate
+// folder. This sends Gemini just the lightweight metadata for every thread
+// folder (subject, message count, date span — never email content) and asks
+// it to suggest which folders are really the same conversation. Nothing
+// merges automatically: suggestions are shown in a modal and the person
+// picks which ones (if any) to apply.
+async function openSmartMergeModal() {
+  if (!currentCustomer) return;
+  openModal("modalSmartMerge");
+  var body = document.getElementById("smartMergeBody");
+  body.innerHTML = '<div class="merge-loading">🤖 Asking AI to compare your saved threads…</div>';
+  try {
+    const res = await fetch(SMART_MERGE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + SUPABASE_KEY, "apikey": SUPABASE_KEY },
+      body: JSON.stringify({ customer_id: currentCustomer.id }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    renderMergeSuggestions(data.groups || []);
+  } catch (e) {
+    body.innerHTML = '<div class="merge-empty">❌ Couldn\'t get suggestions: ' + esc(e.message) + '</div>';
+  }
+}
+function renderMergeSuggestions(groups) {
+  var body = document.getElementById("smartMergeBody");
+  if (!groups.length) {
+    body.innerHTML = '<div class="merge-empty">✅ Nothing to suggest — your threads already look correctly separated.</div>';
+    return;
+  }
+  var html = "";
+  groups.forEach(function (group, gi) {
+    // Primary = the folder with the most emails (ties broken by earliest
+    // first_message_at) — everything else in the group merges into it.
+    var sorted = group.slice().sort(function (a, b) {
+      if (b.count !== a.count) return b.count - a.count;
+      return new Date(a.first || 0) - new Date(b.first || 0);
+    });
+    var primary = sorted[0];
+    var others = sorted.slice(1);
+    html += '<div class="merge-suggestion" id="mergeSuggestion' + gi + '">'
+      + '<div class="merge-suggestion-into">Merge into: ' + esc(primary.subject) + '</div>'
+      + '<div class="merge-suggestion-item is-primary"><span>💬 ' + esc(primary.subject) + '</span><span class="merge-suggestion-item-meta">' + primary.count + ' email' + (primary.count === 1 ? '' : 's') + '</span></div>'
+      + others.map(function (o) {
+          return '<div class="merge-suggestion-item"><span>+ ' + esc(o.subject) + '</span><span class="merge-suggestion-item-meta">' + o.count + ' email' + (o.count === 1 ? '' : 's') + '</span></div>';
+        }).join("")
+      + '<div class="merge-apply-row">'
+      + '<button class="merge-apply-btn" onclick="applyMergeGroup(' + gi + ')">✅ Merge These</button>'
+      + '<button class="merge-dismiss-btn" onclick="dismissMergeGroup(' + gi + ')">Not the same — skip</button>'
+      + '</div></div>';
+  });
+  body.innerHTML = html;
+  window.__mergeGroups = groups; // stashed for applyMergeGroup/dismissMergeGroup below
+}
+function dismissMergeGroup(gi) {
+  var el = document.getElementById("mergeSuggestion" + gi);
+  if (el) el.remove();
+}
+async function applyMergeGroup(gi) {
+  var group = (window.__mergeGroups || [])[gi];
+  if (!group || !currentCustomer) return;
+  var el = document.getElementById("mergeSuggestion" + gi);
+  var btn = el ? el.querySelector(".merge-apply-btn") : null;
+  if (btn) { btn.disabled = true; btn.textContent = "Merging…"; }
+  try {
+    var sorted = group.slice().sort(function (a, b) {
+      if (b.count !== a.count) return b.count - a.count;
+      return new Date(a.first || 0) - new Date(b.first || 0);
+    });
+    var primary = sorted[0];
+    var others = sorted.slice(1);
+    for (const o of others) {
+      // Move every file out of the losing folder into the primary one, then
+      // delete the now-empty folder. One bulk update per folder rather than
+      // per file.
+      const { error: moveErr } = await sb.from("nageo_files_files")
+        .update({ folder_id: primary.id, updated_at: new Date().toISOString() })
+        .eq("customer_id", currentCustomer.id).eq("folder_id", o.id);
+      if (moveErr) throw moveErr;
+      await sb.from("nageo_files_folders").delete().eq("id", o.id);
+    }
+    await refreshFolderActivity(currentCustomer.id, [primary.id]);
+    toast("✅ Merged " + others.length + " folder" + (others.length === 1 ? "" : "s") + " into \"" + primary.subject + "\".", "ok");
+    if (el) el.remove();
+    loadFileView();
+  } catch (e) {
+    toast("❌ Merge failed: " + e.message, "err");
+    if (btn) { btn.disabled = false; btn.textContent = "✅ Merge These"; }
   }
 }
 // Saves every not-yet-saved message in `results` into customerId's locked
@@ -1431,6 +1688,8 @@ async function saveEmailsToFolder(customerId, results) {
             gmail_thread_id: r.gmail_thread_id || null,
             subject: r.subject || null,
             dedup_key: r.rfc822_message_id || computeDedupKey(r.subject, r.from, r.date),
+            email_date: parseDateSafe(r.date),
+            snippet: r.snippet || null,
             updated_at: new Date().toISOString(),
           }).eq("id", existingSameCopy.id);
           regroupedAny = true;
@@ -1459,6 +1718,8 @@ async function saveEmailsToFolder(customerId, results) {
         rfc822_message_id: r.rfc822_message_id || null,
         subject: r.subject || null,
         dedup_key: r.rfc822_message_id || computeDedupKey(r.subject, r.from, r.date),
+        email_date: parseDateSafe(r.date),
+        snippet: r.snippet || null,
       });
       if (insErr) {
         // 23505 = unique violation — either the same (customer_id,
