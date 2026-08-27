@@ -108,6 +108,9 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
 .btn-select.active{background:var(--navy);color:#fff;}
 .btn-search-email{background:#eef2f7;color:var(--text2);}
 .btn-search-email:hover{background:#e2e8f0;}
+.btn-organize{background:#eef2f7;color:var(--text2);}
+.btn-organize:hover{background:#e2e8f0;}
+.btn-organize:disabled{opacity:.6;cursor:default;}
 .file-content{flex:1;overflow-y:auto;padding:14px 18px 90px;position:relative;}
 .drop-overlay{position:absolute;inset:0;background:rgba(46,115,212,.07);border:3px dashed var(--blue);border-radius:var(--radius);display:none;align-items:center;justify-content:center;z-index:10;flex-direction:column;gap:10px;pointer-events:none;}
 .drop-overlay.active{display:flex;}
@@ -350,6 +353,7 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
             <button class="action-btn btn-camera" id="cameraBtn">📷 Take Photo</button>
             <button class="action-btn btn-select" id="selectModeBtn">☑️ Select</button>
             <button class="action-btn btn-search-email" id="searchEmailBtn">🔍 Search Emails</button>
+            <button class="action-btn btn-organize" id="organizeEmailsBtn" title="Regroup, dedupe, and clean up this customer's already-saved emails — doesn't touch Gmail, never removes anything just because it's gone from Gmail">🗂️ Organize Emails</button>
           </div>
         </div>
         <div class="file-content" id="fileContent">
@@ -516,6 +520,6 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
      GitHub Pages' CDN can keep serving a stale cached copy of app.js even
      after a hard refresh of this page, since app.js itself was never
      re-requested. Bump this number any time app.js changes. -->
-<script src="app.js?v=8"></script>
+<script src="app.js?v=9"></script>
 </body>
 </html>
