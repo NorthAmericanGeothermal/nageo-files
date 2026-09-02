@@ -31,6 +31,15 @@ const EMAILS_FOLDER_NAME = "📧 Emails";
 let regCode = localStorage.getItem(REG_KEY) || "";
 let allCustomers = [];
 let filteredCustomers = [];
+// Customer sidebar sort — 'name' (default, A–Z) or 'recent' (most recently
+// emailed first; there's deliberately no "oldest emailed" option, this is
+// purely for surfacing who needs attention). lastEmailedByCustomer maps
+// customer_id -> timestamp (ms) of their newest saved email, loaded lazily
+// the first time "recent" sort is selected and refreshed on every re-sync/
+// organize pass so it reflects newly-saved emails.
+let customerSortOrder = localStorage.getItem("nageo_files_customer_sort") === "recent" ? "recent" : "name";
+let lastEmailedByCustomer = {};
+let lastEmailedLoaded = false;
 let currentCustomer = null;
 let currentFolderId = null;
 let currentFolderIsSystem = false; // true while viewing inside the locked Emails folder
@@ -243,6 +252,9 @@ async function loadCustomers() {
     all.sort((a, b) => a.name.localeCompare(b.name));
     allCustomers = all;
     filteredCustomers = all;
+    if (customerSortOrder === "recent" && !lastEmailedLoaded) {
+      await loadLastEmailedDates();
+    }
     renderCustomerList(all);
   } catch (e) {
     document.getElementById("customerList").innerHTML = `<div class="sidebar-msg">❌ Could not load customers.<br><small>${e.message}</small><br><br><button onclick="loadCustomers()" style="padding:8px 16px;background:var(--blue);color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:13px;">Try Again</button></div>`;
@@ -268,21 +280,91 @@ function filterCustomers(q) {
   );
   renderCustomerList(filteredCustomers);
 }
+// Customer sidebar sort — reads customerSortOrder + lastEmailedByCustomer
+// (see setCustomerSortOrder/loadLastEmailedDates). Customers with no saved
+// email at all sink to the bottom under "recent" sort, alphabetically among
+// themselves, rather than being hidden or thrown to a random spot.
+function sortCustomersForDisplay(customers) {
+  var arr = customers.slice();
+  if (customerSortOrder === "recent") {
+    arr.sort(function (a, b) {
+      var ta = lastEmailedByCustomer[a.id] || -Infinity;
+      var tb = lastEmailedByCustomer[b.id] || -Infinity;
+      if (tb !== ta) return tb - ta;
+      return a.name.localeCompare(b.name);
+    });
+  } else {
+    arr.sort(function (a, b) { return a.name.localeCompare(b.name); });
+  }
+  return arr;
+}
+function setCustomerSortOrder(v) {
+  customerSortOrder = (v === "recent") ? "recent" : "name";
+  localStorage.setItem("nageo_files_customer_sort", customerSortOrder);
+  if (customerSortOrder === "recent" && !lastEmailedLoaded) {
+    document.getElementById("customerList").innerHTML = '<div class="sidebar-msg">Loading last-emailed dates…</div>';
+    loadLastEmailedDates().then(function () { renderCustomerList(filteredCustomers); });
+  } else {
+    renderCustomerList(filteredCustomers);
+  }
+}
+// Pulls every saved email file's effective date (same bestFileDate() logic
+// the thread view trusts) grouped by customer, keeping only the newest per
+// customer. Paginated since a shop with a lot of email history can easily
+// have more saved emails than a single query page. Lazy — only runs the
+// first time "Recently Emailed" sort is picked — and re-runs on every pick
+// after a sync/organize pass so it can't go stale (see syncOneCustomer /
+// syncAllCustomers / runOrganizePass).
+async function loadLastEmailedDates() {
+  var map = {};
+  var pageSize = 1000;
+  var from = 0;
+  try {
+    while (true) {
+      var res = await sb.from("nageo_files_files")
+        .select("customer_id, name, email_date, created_at")
+        .not("gmail_message_id", "is", null)
+        .range(from, from + pageSize - 1);
+      if (res.error) throw res.error;
+      var rows = res.data || [];
+      rows.forEach(function (f) {
+        var d = bestFileDate(f);
+        if (!d) return;
+        var t = new Date(d).getTime();
+        if (isNaN(t)) return;
+        if (!map[f.customer_id] || t > map[f.customer_id]) map[f.customer_id] = t;
+      });
+      if (rows.length < pageSize) break;
+      from += pageSize;
+    }
+    lastEmailedByCustomer = map;
+    lastEmailedLoaded = true;
+  } catch (e) {
+    toast("❌ Could not load last-emailed dates: " + e.message, "err");
+  }
+}
 function renderCustomerList(customers) {
   const el = document.getElementById("customerList");
+  var sortSelect = document.getElementById("customerSortSelect");
+  if (sortSelect && sortSelect.value !== customerSortOrder) sortSelect.value = customerSortOrder;
   if (!customers.length) {
     el.innerHTML = '<div class="sidebar-msg">No customers found.<br><small>Try a different search term.</small></div>';
     return;
   }
-  el.innerHTML = customers.map(c => `
+  var sorted = sortCustomersForDisplay(customers);
+  el.innerHTML = sorted.map(c => {
+    var lastEmailed = customerSortOrder === "recent" ? lastEmailedByCustomer[c.id] : null;
+    var metaExtra = lastEmailed ? ' · Emailed ' + formatAmericanDate(lastEmailed) : (customerSortOrder === "recent" ? ' · No emails saved' : '');
+    return `
     <div class="customer-item${currentCustomer && currentCustomer.id === c.id ? ' active' : ''}" onclick="selectCustomer('${c.id}')">
       <div class="customer-avatar">${initials(c.name)}</div>
       <div class="customer-info">
         <div class="customer-name">${esc(c.name)}</div>
-        <div class="customer-meta">#${esc(c.customer_id)}${c.address ? ' · ' + esc(c.address) : ''}</div>
+        <div class="customer-meta">#${esc(c.customer_id)}${c.address ? ' · ' + esc(c.address) : ''}${esc(metaExtra)}</div>
       </div>
     </div>
-  `).join("");
+  `;
+  }).join("");
 }
 function selectCustomer(id) {
   const c = allCustomers.find(x => x.id === id);
@@ -1609,6 +1691,19 @@ async function organizeCustomerEmails(customerId, opts) {
   if (!opts.silent && (moved || merged || foldersRemoved) && currentCustomer && currentCustomer.id === customerId) {
     loadFileView();
   }
+  // Every sync path (single-profile and global) runs this organize pass
+  // afterward, so this is the one shared spot to know "email data may have
+  // changed" — invalidate the last-emailed cache so it gets rebuilt rather
+  // than staying stale. Skip the immediate reload+re-render when called
+  // silently in a bulk loop (startOrganizeAllCustomers) — that would mean
+  // one full re-scan per customer; the bulk caller does a single reload of
+  // its own once the whole loop finishes instead.
+  lastEmailedLoaded = false;
+  if (!opts.silent && customerSortOrder === "recent") {
+    loadLastEmailedDates().then(function () {
+      if (document.getElementById("customerList")) renderCustomerList(filteredCustomers);
+    });
+  }
   return { moved, merged, foldersRemoved, backfilled };
 }
 // Wires the "🗂️ Organize Emails" button — runs organizeCustomerEmails for
@@ -2121,6 +2216,9 @@ async function startOrganizeAllCustomers() {
   organizeAllRunning = false;
   toast("🗂️ Organized " + customers.length + " customers — " + totalMoved + " refiled, " + totalMerged + " duplicates merged, " + totalFoldersRemoved + " empty folders removed.", "ok");
   if (currentCustomer) loadFileView();
+  if (customerSortOrder === "recent") {
+    loadLastEmailedDates().then(function () { renderCustomerList(filteredCustomers); });
+  }
 }
 function appendSweepLogRow(name, resultText, hasNew) {
   var logEl = document.getElementById("sweepLog");
