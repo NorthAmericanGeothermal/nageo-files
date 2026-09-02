@@ -382,7 +382,13 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
   <div class="app-body">
     <div class="sidebar" id="sidebar">
       <div class="sidebar-header">
-        <div class="sidebar-title">All Customers</div>
+        <div class="sidebar-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <span>All Customers</span>
+          <select class="thread-sort-select" id="customerSortSelect" onchange="setCustomerSortOrder(this.value)" style="text-transform:none;letter-spacing:normal;font-weight:600;">
+            <option value="name">Sort: Name (A–Z)</option>
+            <option value="recent">Sort: Recently Emailed</option>
+          </select>
+        </div>
         <div class="sidebar-search">
           <span class="sidebar-search-icon">🔍</span>
           <input type="text" id="customerSearch" placeholder="Search name, ID, address…" autocomplete="off">
@@ -606,6 +612,6 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sa
      GitHub Pages' CDN can keep serving a stale cached copy of app.js even
      after a hard refresh of this page, since app.js itself was never
      re-requested. Bump this number any time app.js changes. -->
-<script src="app.js?v=14"></script>
+<script src="app.js?v=15"></script>
 </body>
 </html>
