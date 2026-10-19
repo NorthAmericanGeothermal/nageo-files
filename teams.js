@@ -95,6 +95,18 @@
   function nameHas(name, text) {
     return String(name || "").toLowerCase().indexOf(String(text || "").toLowerCase()) !== -1;
   }
+  // Soft safety check: does this channel's name share any word with the
+  // customer's name? Catches a reused/mistyped ID (two different people on
+  // one 5-digit number). Channels pulled in by a parent-group rule are exempt.
+  function channelNameLooksRight(ch) {
+    if (!currentCustomer) return true;
+    if (ch.id_tag !== currentCustomer.customer_id) return true;
+    var words = String(currentCustomer.name || "").toLowerCase().split(/[^a-z]+/).filter(function (w) { return w.length >= 3; });
+    if (!words.length) return true;
+    var hay = String(ch.channel_name || "").toLowerCase();
+    return words.some(function (w) { return hay.indexOf(w) !== -1; });
+  }
+
   async function loadTeamsChannelsFor(c) {
     try {
       if (teamsParents === null) {
@@ -237,7 +249,7 @@
         html += '<div class="folder-card teams-folder" onclick="teamsOpenChannel(' + i + ')">'
           + '<div class="card-icon">📁</div>'
           + '<div class="card-name">' + esc(c.channel_name) + '</div>'
-          + '<div class="card-meta">' + esc(c.team_name) + '</div></div>';
+          + '<div class="card-meta">' + esc(c.team_name) + (channelNameLooksRight(c) ? '' : ' · ⚠️ name differs — verify') + '</div></div>';
       });
       el.innerHTML = html + '</div>';
       return;
@@ -251,7 +263,12 @@
       cur.drive_id = data.drive_id;
       cur.item_id = data.item_id;
       teamsItems = data.items || [];
-      renderTeamsItems(overlay);
+      var first = teamsView.trail[0];
+      var info = teamsView.channels.filter(function (c) { return c.channel_id === first.channel_id; })[0];
+      var warn = (info && !channelNameLooksRight(info))
+        ? '<div class="teams-note" style="color:#b45309;font-weight:600;">⚠️ The Teams channel "' + esc(info.channel_name) + '" has a different name than this customer. The ID may be shared or mistyped — verify before using these files.</div>'
+        : '';
+      renderTeamsItems(overlay + warn);
     } catch (e) {
       if (token !== teamsLoadToken) return;
       el.innerHTML = overlay + '<div style="padding:2rem;text-align:center;color:var(--red);">❌ Could not load Teams files.<br><small>' + esc(e.message) + '</small><br><br>'
