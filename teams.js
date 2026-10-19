@@ -5,7 +5,7 @@
 // "Microsoft Teams Files" folder to each customer's root, backed live by the
 // Teams/SharePoint files through the nageo-files-teams edge function. It
 // extends app.js by wrapping a few of its functions — app.js itself is not
-// edited. Read-only for now (browse / preview / download).
+// edited. Browse / preview / download / upload / new folder.
 //
 // HARD STOP: if a Teams channel uses a customer's 5-digit ID but its name
 // doesn't match the customer, nothing opens. A decision screen asks whether
@@ -67,7 +67,20 @@
     ".teams-btn-yes{background:var(--green);border-color:var(--green);color:#fff;}" +
     ".teams-btn-no{background:var(--red);border-color:var(--red);color:#fff;}" +
     ".teams-btn-yes:hover,.teams-btn-no:hover{opacity:.9;}" +
-    ".teams-btn-skip:hover{background:#eef2f7;}";
+    ".teams-btn-skip:hover{background:#eef2f7;}" +
+    ".profile-search{position:relative;margin:0 0 12px;}" +
+    ".profile-search input{width:100%;padding:10px 14px 10px 38px;border:1.5px solid var(--border);border-radius:20px;font-size:14px;font-family:inherit;background:#f8fafc;color:var(--text);}" +
+    ".profile-search input:focus{outline:none;border-color:var(--blue);background:#fff;}" +
+    ".profile-search-icon{position:absolute;left:14px;top:50%;transform:translateY(-50%);font-size:14px;pointer-events:none;}" +
+    ".psr-list{display:flex;flex-direction:column;gap:6px;margin-bottom:6px;}" +
+    ".psr-row{display:flex;align-items:center;gap:12px;background:var(--surface);border:1.5px solid var(--border);border-radius:10px;padding:10px 12px;cursor:pointer;}" +
+    ".psr-row:hover{border-color:var(--blue);}" +
+    ".psr-teams{border-color:#c7cbf5;}" +
+    ".psr-icon{font-size:22px;flex-shrink:0;}" +
+    ".psr-main{flex:1;min-width:0;}" +
+    ".psr-name{font-size:13.5px;font-weight:600;color:var(--text);word-break:break-word;}" +
+    ".psr-sub{font-size:11.5px;color:var(--text3);margin-top:2px;word-break:break-word;}" +
+    ".psr-empty{font-size:13px;color:var(--text3);padding:6px 2px 8px;}";
   document.head.appendChild(style);
 
   // ── Unlock screen: store the real code instead of the word "true" ──
@@ -177,6 +190,7 @@
   // take over completely while browsing inside Teams. ──
   var origLoadFileView = window.loadFileView;
   window.loadFileView = async function () {
+    clearProfileSearch(); // any normal reload leaves the search results screen
     if (teamsView) return loadTeamsView();
     currentTeamsChannels = (!currentFolderId && currentCustomer) ? await loadTeamsChannelsFor(currentCustomer) : [];
     return origLoadFileView();
@@ -417,6 +431,7 @@
       cur.item_id = data.item_id;
       teamsItems = data.items || [];
       renderTeamsItems(overlay);
+      updateSystemFolderUI(); // now that this folder's address is known, the upload buttons can appear
     } catch (e) {
       if (token !== teamsLoadToken) return;
       el.innerHTML = overlay + '<div style="padding:2rem;text-align:center;color:var(--red);">❌ Could not load Teams files.<br><small>' + esc(e.message) + '</small><br><br>'
@@ -509,30 +524,385 @@
     var orig = window[name];
     window[name] = function () {
       teamsView = null;
+      clearProfileSearch();
       return orig.apply(this, arguments);
     };
   });
 
-  // ── Read-only for now: hide the buttons that would change things ──
+  // ══ SEARCH INSIDE ONE CUSTOMER'S PROFILE ══════════════════════════════════
+  // A search box on every customer page. It searches (1) the site's own
+  // files, folders and saved emails for that customer, and (2) every file
+  // and folder in their Teams channels. Teams files are read once per
+  // customer (a full walk of their folders), kept in the browser, and
+  // matched locally — so partial words and folder names work, and repeat
+  // searches are instant. Same hard stop as everywhere else: if a channel
+  // is awaiting review, Teams results stay locked.
+  var searchActive = false;
+  var searchSeq = 0;
+  var searchTimer = null;
+  var teamsIndex = null; // { key, items, truncated, failed }
+  var profRes = { siteFiles: [], siteFolders: [], teams: [], channelsAll: [], labels: {} };
+
+  function clearProfileSearch() {
+    searchActive = false;
+    searchSeq++;
+    var input = document.getElementById("profileSearchInput");
+    if (input) input.value = "";
+  }
+
+  function injectSearchBox() {
+    var actions = document.querySelector(".file-header .file-actions");
+    if (!actions || document.getElementById("profileSearchInput")) return;
+    var wrap = document.createElement("div");
+    wrap.className = "profile-search";
+    wrap.innerHTML = '<span class="profile-search-icon">🔍</span>'
+      + '<input type="text" id="profileSearchInput" placeholder="Search this customer\'s files, emails and Teams files…" autocomplete="off">';
+    actions.parentNode.insertBefore(wrap, actions);
+    var input = document.getElementById("profileSearchInput");
+    input.addEventListener("input", function () {
+      clearTimeout(searchTimer);
+      var v = input.value;
+      searchTimer = setTimeout(function () { runProfileSearch(v); }, 400);
+    });
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { clearTimeout(searchTimer); runProfileSearch(input.value); }
+      if (e.key === "Escape") { window.profClearSearch(); }
+    });
+  }
+  injectSearchBox();
+
+  async function runProfileSearch(raw) {
+    var q = String(raw || "").trim();
+    if (!currentCustomer) return;
+    if (!q) { if (searchActive) loadFileView(); return; }
+    if (q.length < 2) return;
+    var words = q.toLowerCase().split(/\s+/).filter(Boolean);
+    var seq = ++searchSeq;
+    searchActive = true;
+    var cid = currentCustomer.id;
+    var allWords = function (text) {
+      var t = String(text || "").toLowerCase();
+      return words.every(function (w) { return t.indexOf(w) !== -1; });
+    };
+
+    // 1) The site's own files, folders and saved emails
+    var siteFiles = [], siteFolders = [];
+    try {
+      var fr = await sb.from("nageo_files_files").select("*").eq("customer_id", cid).ilike("name", "%" + words[0] + "%").limit(300);
+      var dr = await sb.from("nageo_files_folders").select("*").eq("customer_id", cid).ilike("name", "%" + words[0] + "%").limit(100);
+      siteFiles = (fr.data || []).filter(function (f) { return allWords(f.name); });
+      siteFolders = (dr.data || []).filter(function (f) { return !f.is_system && !f.subject_key && allWords(f.name); });
+    } catch (e) { /* show whatever we have */ }
+    if (seq !== searchSeq) return;
+
+    // 2) Teams
+    var chans = await loadTeamsChannelsFor(currentCustomer);
+    if (seq !== searchSeq) return;
+    profRes.channelsAll = chans;
+    var usable = chans.filter(function (c) { return c.status === "ok"; });
+    var reviewCount = chans.filter(function (c) { return c.status === "review"; }).length;
+    var tState = reviewCount ? "locked" : (usable.length ? "indexing" : "none");
+    renderProfileResults(q, siteFiles, siteFolders, [], tState, "");
+    if (tState !== "indexing") return;
+
+    var key = cid + "|" + usable.map(function (c) { return c.channel_id; }).sort().join(",");
+    try {
+      if (!teamsIndex || teamsIndex.key !== key) {
+        var data = await teamsCall({ action: "list_tree", channel_ids: usable.map(function (c) { return c.channel_id; }) });
+        teamsIndex = { key: key, items: data.items || [], truncated: !!data.truncated, failed: data.failed_folders || 0 };
+      }
+    } catch (e) {
+      if (seq !== searchSeq) return;
+      renderProfileResults(q, siteFiles, siteFolders, [], "error", e.message);
+      return;
+    }
+    if (seq !== searchSeq) return;
+
+    var labels = {};
+    usable.forEach(function (c) { labels[c.channel_id] = c.channel_name; });
+    profRes.labels = labels;
+    var qLower = q.toLowerCase();
+    var hits = teamsIndex.items.filter(function (it) {
+      return allWords(it.name + " " + it.path + " " + (labels[it.channel_id] || ""));
+    });
+    hits.sort(function (a, b) {
+      var an = a.name.toLowerCase().indexOf(qLower) !== -1 ? 0 : 1;
+      var bn = b.name.toLowerCase().indexOf(qLower) !== -1 ? 0 : 1;
+      if (an !== bn) return an - bn;
+      if (a.is_folder !== b.is_folder) return a.is_folder ? 1 : -1;
+      return String(b.modified || "").localeCompare(String(a.modified || ""));
+    });
+    renderProfileResults(q, siteFiles, siteFolders, hits, "done", "");
+  }
+
+  function renderProfileResults(q, siteFiles, siteFolders, teamsHits, tState, note) {
+    profRes.siteFiles = siteFiles;
+    profRes.siteFolders = siteFolders;
+    profRes.teams = teamsHits;
+    var el = document.getElementById("fileContent");
+    el.classList.remove("select-mode");
+    var LIMIT = 100;
+    var html = '<div class="drop-overlay" id="dropOverlay"></div>'
+      + '<div class="teams-toolbar"><span class="teams-note">Results for “' + esc(q) + '”</span>'
+      + '<button class="teams-btn-skip" onclick="profClearSearch()">✕ Clear search</button></div>';
+
+    // This customer's regular files
+    var siteCount = siteFiles.length + siteFolders.length;
+    html += '<div class="section-label">📄 Regular folders and emails (' + siteCount + ')</div>';
+    if (!siteCount) {
+      html += '<div class="psr-empty">No matches in the regular folders.</div>';
+    } else {
+      html += '<div class="psr-list">';
+      siteFolders.slice(0, LIMIT).forEach(function (f, i) {
+        html += '<div class="psr-row" onclick="profOpenSiteFolder(' + i + ')"><div class="psr-icon">📁</div>'
+          + '<div class="psr-main"><div class="psr-name">' + esc(f.name) + '</div><div class="psr-sub">Folder</div></div></div>';
+      });
+      siteFiles.slice(0, LIMIT).forEach(function (f, i) {
+        var isEmail = !!f.gmail_message_id;
+        html += '<div class="psr-row" onclick="profOpenSiteFile(' + i + ')">'
+          + '<div class="psr-icon">' + (isEmail ? '✉️' : fileIcon(f.name)) + '</div>'
+          + '<div class="psr-main"><div class="psr-name">' + esc(f.name) + '</div>'
+          + '<div class="psr-sub">' + (isEmail ? 'Saved email' : 'Regular folder') + (f.size ? ' · ' + formatSize(f.size) : '') + '</div></div>'
+          + (!isEmail && f.folder_id ? '<button class="teams-btn-skip" onclick="event.stopPropagation();profFileFolder(' + i + ')">📂 Folder</button>' : '')
+          + '</div>';
+      });
+      html += '</div>';
+      if (siteCount > LIMIT * 2) html += '<div class="psr-empty">Showing the first results — type more to narrow it down.</div>';
+    }
+
+    // Microsoft Teams files
+    html += '<div class="section-label" style="margin-top:14px;">Microsoft Teams Files' + (tState === "done" ? ' (' + teamsHits.length + ')' : '') + '</div>';
+    if (tState === "indexing") {
+      html += '<div class="psr-empty">🔎 Reading this customer\'s Teams files for the first time — this can take 5 to 20 seconds, and only happens once per customer.</div>';
+    } else if (tState === "locked") {
+      html += '<div class="psr-empty">🔒 Teams files are locked for this customer until a flagged channel is reviewed. '
+        + '<button class="teams-btn-skip" onclick="profReviewTeams()">Review now</button></div>';
+    } else if (tState === "error") {
+      html += '<div class="psr-empty" style="color:var(--red);">❌ Couldn\'t search Teams: ' + esc(note) + '</div>';
+    } else if (tState === "none") {
+      html += '<div class="psr-empty">This customer has no Teams files.</div>';
+    } else if (!teamsHits.length) {
+      html += '<div class="psr-empty">No matches in Teams files.</div>';
+    } else {
+      html += '<div class="psr-list">';
+      teamsHits.slice(0, LIMIT).forEach(function (it, i) {
+        var where = (profRes.labels[it.channel_id] || "") + (it.path ? " › " + it.path : "");
+        html += '<div class="psr-row psr-teams" onclick="profOpenTeams(' + i + ')">'
+          + '<div class="psr-icon">' + (it.is_folder ? '📁' : fileIcon(it.name)) + '</div>'
+          + '<div class="psr-main"><div class="psr-name">' + esc(it.name) + '</div>'
+          + '<div class="psr-sub">' + esc(where)
+          + (!it.is_folder && it.size ? ' · ' + formatSize(it.size) : '')
+          + (it.modified ? ' · ' + formatAmericanDate(it.modified) : '') + '</div></div>'
+          + (!it.is_folder ? '<button class="teams-btn-skip" onclick="event.stopPropagation();profTeamsFolder(' + i + ')">📂 Folder</button>' : '')
+          + '</div>';
+      });
+      html += '</div>';
+      if (teamsHits.length > LIMIT) html += '<div class="psr-empty">Showing the first ' + LIMIT + ' — type more to narrow it down.</div>';
+    }
+    if (tState === "done") {
+      if (teamsIndex && teamsIndex.truncated) html += '<div class="psr-empty">This customer has a very large number of files, so only part of them were scanned.</div>';
+      if (teamsIndex && teamsIndex.failed) html += '<div class="psr-empty">' + teamsIndex.failed + ' folder(s) couldn\'t be read, so results may be missing a few files.</div>';
+      html += '<button class="teams-btn-skip" onclick="profRescan()">🔄 Re-scan Teams files</button>';
+    }
+    el.innerHTML = html;
+  }
+
+  // ── Search result actions ──
+  window.profClearSearch = function () { clearProfileSearch(); loadFileView(); };
+
+  window.profOpenSiteFile = function (i) {
+    var f = profRes.siteFiles[i];
+    if (f) previewFile(f);
+  };
+  window.profOpenSiteFolder = function (i) {
+    var f = profRes.siteFolders[i];
+    if (f) jumpToFolder(currentCustomer.id, f.id);
+  };
+  window.profFileFolder = function (i) {
+    var f = profRes.siteFiles[i];
+    if (f && f.folder_id) jumpToFolder(currentCustomer.id, f.folder_id);
+  };
+  window.profRescan = function () {
+    teamsIndex = null;
+    var input = document.getElementById("profileSearchInput");
+    if (input) runProfileSearch(input.value);
+  };
+  window.profReviewTeams = function () {
+    currentTeamsChannels = profRes.channelsAll.slice();
+    clearProfileSearch();
+    openTeamsRoot();
+  };
+  window.profOpenTeams = function (i) {
+    var it = profRes.teams[i];
+    if (!it) return;
+    if (it.is_folder) openTeamsLocation(it, true);
+    else viewTeamsFile(it);
+  };
+  window.profTeamsFolder = function (i) {
+    var it = profRes.teams[i];
+    if (it) openTeamsLocation(it, false);
+  };
+
+  // Jumps into the Teams view at the folder holding (or being) a search result.
+  function openTeamsLocation(it, openSelf) {
+    var all = profRes.channelsAll.slice();
+    var usable = all.filter(function (c) { return c.status === "ok"; });
+    var ch = usable.filter(function (c) { return c.channel_id === it.channel_id; })[0];
+    if (!ch) return;
+    teamsView = { all: all, channels: usable, trail: [{ type: "channel", label: ch.channel_name, channel_id: ch.channel_id }], skipped: {} };
+    if (openSelf) {
+      teamsView.trail.push({ type: "folder", label: it.name, channel_id: ch.channel_id, drive_id: it.drive_id, item_id: it.id });
+    } else if (it.path) {
+      teamsView.trail.push({ type: "folder", label: it.path.split(" › ").pop(), channel_id: ch.channel_id, drive_id: it.drive_id, item_id: it.parent_id });
+    }
+    loadFileView();
+  }
+
+  // Preview / download a Teams file straight from a search result.
+  async function viewTeamsFile(it) {
+    var isImage = (it.mime || "").indexOf("image/") === 0;
+    var isPDF = it.mime === "application/pdf" || /\.pdf$/i.test(it.name);
+    if (!isImage && !isPDF) { downloadTeamsFile(it); return; }
+    document.getElementById("previewTitle").textContent = it.name;
+    document.getElementById("previewContent").innerHTML = '<div style="padding:2rem;text-align:center;color:var(--text3);">Loading preview…</div>';
+    openModal("modalPreview");
+    try {
+      var blob = await teamsCall({ action: "file", drive_id: it.drive_id, item_id: it.id }, true);
+      var url = URL.createObjectURL(isPDF ? new Blob([blob], { type: "application/pdf" }) : blob);
+      document.getElementById("previewContent").innerHTML = isPDF
+        ? '<iframe class="preview-pdf" src="' + url + '"></iframe>'
+        : '<img class="preview-img" src="' + url + '" alt="' + esc(it.name) + '">';
+    } catch (e) {
+      document.getElementById("previewContent").innerHTML = '<div style="padding:2rem;text-align:center;color:var(--red);">❌ Could not load preview.<br><small>' + esc(e.message) + '</small></div>';
+    }
+  }
+  async function downloadTeamsFile(it) {
+    toast("⬇️ Downloading…");
+    try {
+      var blob = await teamsCall({ action: "file", drive_id: it.drive_id, item_id: it.id }, true);
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = it.name;
+      a.click();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
+    } catch (e) {
+      toast("❌ Download failed: " + e.message, "err");
+    }
+  }
+
+  // ── Writing to Teams (upload / new folder) ──
+  // Allowed ONLY inside a channel that is verified ("ok") with nothing
+  // awaiting a decision — the same hard stop as viewing.
+  function canTeamsWrite() {
+    if (!teamsView || !teamsView.trail.length || teamsPendingCount() || !teamsView.channels.length) return false;
+    var cur = currentTeamsParent();
+    var ch = teamsView.all.filter(function (c) { return c.channel_id === cur.channel_id; })[0];
+    return !!(ch && ch.status === "ok" && cur.drive_id && cur.item_id);
+  }
+
+  // Buttons: normal view untouched; inside Teams, Upload / Take Photo / New
+  // Folder show only where writing is allowed; Select and Email Tools are
+  // hidden (they only apply to the site's own files).
   var origUpdateSystemFolderUI = window.updateSystemFolderUI;
   window.updateSystemFolderUI = function () {
     origUpdateSystemFolderUI();
-    var hide = !!teamsView;
-    if (hide) {
+    if (teamsView) {
+      var show = canTeamsWrite();
       ["newFolderBtn", "uploadBtn", "cameraBtn"].forEach(function (id) {
         var b = document.getElementById(id);
-        if (b) b.style.display = "none";
+        if (b) b.style.display = show ? "" : "none";
       });
     }
     var sel = document.getElementById("selectModeBtn");
-    if (sel) sel.style.display = hide ? "none" : "";
+    if (sel) sel.style.display = teamsView ? "none" : "";
     var tools = document.querySelector(".email-tools-wrap");
-    if (tools) tools.style.display = hide ? "none" : "";
+    if (tools) tools.style.display = teamsView ? "none" : "";
   };
+
+  var UPLOAD_CHUNK = 327680 * 12; // ~3.75 MB — SharePoint needs multiples of 320 KiB
+
+  // Sends one file's bytes straight to the SharePoint upload address.
+  async function putFileInChunks(uploadUrl, file, onProgress) {
+    var total = file.size;
+    var start = 0;
+    while (start < total) {
+      var end = Math.min(start + UPLOAD_CHUNK, total) - 1;
+      var res = await fetch(uploadUrl, {
+        method: "PUT",
+        headers: { "Content-Range": "bytes " + start + "-" + end + "/" + total },
+        body: file.slice(start, end + 1),
+      });
+      if (res.status >= 400) throw new Error("SharePoint refused the upload (" + res.status + ")");
+      start = end + 1;
+      onProgress(start / total);
+    }
+  }
+
+  async function teamsUpload(files) {
+    if (!canTeamsWrite()) { toast("🔒 Open a verified Teams channel folder first.", "err"); return; }
+    var cur = currentTeamsParent();
+    var bar = document.getElementById("uploadBar");
+    var fill = document.getElementById("uploadFill");
+    var pct = document.getElementById("uploadPct");
+    var label = document.getElementById("uploadLabel");
+    bar.classList.add("show");
+    var done = 0, failed = 0;
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      label.textContent = "Uploading to Teams " + (i + 1) + " of " + files.length + ": " + f.name;
+      try {
+        if (!f.size) throw new Error("that file is empty");
+        var s = await teamsCall({ action: "upload_session", drive_id: cur.drive_id, parent_item_id: cur.item_id, name: f.name });
+        await putFileInChunks(s.upload_url, f, function (frac) {
+          var p = Math.round(((i + frac) / files.length) * 100);
+          fill.style.width = p + "%";
+          pct.textContent = p + "%";
+        });
+        done++;
+      } catch (e) {
+        failed++;
+        toast("❌ " + f.name + ": " + e.message, "err");
+      }
+    }
+    fill.style.width = "100%";
+    pct.textContent = "100%";
+    label.textContent = failed ? "Finished with errors" : "Upload complete!";
+    setTimeout(function () { bar.classList.remove("show"); }, 1500);
+    teamsIndex = null; // the cached file list for search is now out of date
+    if (done) toast("✅ " + done + " file" + (done === 1 ? "" : "s") + " uploaded to Teams.", "ok");
+    if (teamsView) loadFileView();
+  }
 
   var origUploadFiles = window.uploadFiles;
   window.uploadFiles = function (files) {
-    if (teamsView) { toast("🔒 Microsoft Teams files are view-only here for now.", "err"); return; }
+    if (teamsView) return teamsUpload(files);
     return origUploadFiles(files);
+  };
+
+  var origCreateFolder = window.createFolder;
+  window.createFolder = async function () {
+    if (!teamsView) return origCreateFolder();
+    var input = document.getElementById("newFolderName");
+    var name = input.value.trim();
+    if (!name) { input.focus(); return; }
+    if (!canTeamsWrite()) { closeModal("modalNewFolder"); toast("🔒 Open a verified Teams channel folder first.", "err"); return; }
+    var cur = currentTeamsParent();
+    var btn = document.getElementById("createFolderBtn");
+    btn.textContent = "Creating…";
+    btn.disabled = true;
+    try {
+      await teamsCall({ action: "mkdir", drive_id: cur.drive_id, parent_item_id: cur.item_id, name: name });
+      closeModal("modalNewFolder");
+      input.value = "";
+      teamsIndex = null;
+      toast("📁 Folder created in Teams!", "ok");
+      loadFileView();
+    } catch (e) {
+      toast("❌ " + e.message, "err");
+    } finally {
+      btn.textContent = "📁 Create Folder";
+      btn.disabled = false;
+    }
   };
 })();
