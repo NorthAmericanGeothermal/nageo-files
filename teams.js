@@ -12,7 +12,7 @@
 // it's the same customer, and the answer is remembered per customer+channel
 // (nageo_files_teams_decisions).
 //
-// To turn the feature off: delete the <script src="teams.js…"> line.
+// To turn the feature off: delete the <script src="teams.js…"> line..
 // ══════════════════════════════════════════════════════════════════════════
 (function () {
   "use strict";
