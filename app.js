@@ -152,16 +152,7 @@ function wireEvents() {
   document.getElementById("searchEmailsAddInput").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); addSearchEmail(); } });
   document.getElementById("searchEmailsGoBtn").addEventListener("click", function () { startEmailSearch(); });
   document.getElementById("searchEmailsStopBtn").addEventListener("click", function () { emailSearchCancelled = true; });
-  // Drag and drop (file system → upload)
-  const fc = document.getElementById("fileContent");
-  fc.addEventListener("dragover", e => { e.preventDefault(); document.getElementById("dropOverlay").classList.add("active"); });
-  fc.addEventListener("dragleave", e => { if (!fc.contains(e.relatedTarget)) document.getElementById("dropOverlay").classList.remove("active"); });
-  fc.addEventListener("drop", e => {
-    e.preventDefault();
-    document.getElementById("dropOverlay").classList.remove("active");
-    const files = Array.from(e.dataTransfer.files);
-    if (files.length) uploadFiles(files);
-  });
+  // Drag and drop (file system → upload) is wired once, in rewireDrop() below.
   // Context menu actions
   document.getElementById("ctxOpen").addEventListener("click", () => {
     if (!ctxTarget) return;
@@ -644,10 +635,13 @@ function shortSenderName(from) {
   var name = m ? m[1].trim() : from.trim();
   return name.length > 40 ? name.slice(0, 40) + "…" : name;
 }
+var dropWired = false; // rewireDrop() runs on every re-render — only attach the listeners the first time, or one drop uploads N times
 function rewireDrop() {
+  if (dropWired) return;
   const fc = document.getElementById("fileContent");
   const ov = document.getElementById("dropOverlay");
   if (!ov) return;
+  dropWired = true;
   fc.addEventListener("dragover", e => { e.preventDefault(); if (!currentFolderIsSystem) ov.classList.add("active"); });
   fc.addEventListener("dragleave", e => { if (!fc.contains(e.relatedTarget)) ov.classList.remove("active"); });
   fc.addEventListener("drop", e => {
